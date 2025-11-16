@@ -55,7 +55,7 @@ class AuthRepository:
 
         return user
 
-    async def create_user(self, user: User) -> User:
+    async def save_user(self, user: User) -> User:
         """
         Adds a new user to the database.
         """
@@ -90,10 +90,18 @@ class AuthRepository:
         if cached_user_str:
             logger.debug(f"CACHE-FETCH: Cache hit for user {user_id}.")
             user_data = json.loads(cached_user_str)
-            # Rehydrate the string dates back into datetime objects
-            user_data["created_at"] = datetime.fromisoformat(user_data["created_at"])
-            user_data["updated_at"] = datetime.fromisoformat(user_data["updated_at"])
-            return User(**user_data)
+            user = User()
+
+            # 2. Manually set the attributes you have from the cache.
+            user.user_id = user_data["user_id"]
+            user.username = user_data["username"]
+            user.created_at = datetime.fromisoformat(user_data["created_at"])
+            user.updated_at = datetime.fromisoformat(user_data["updated_at"])
+
+            # 3. Return the partially-hydrated, secure object.
+            #    The 'user.password_hash' attribute will be None, which is correct and safe
+            #    because this object will never be used for password verification.
+            return user
 
         logger.debug(f"CACHE-FETCH: Cache miss for user {user_id}. Fetching from DB.")
 
@@ -107,7 +115,6 @@ class AuthRepository:
         user_data_to_cache: Dict[str, Any] = {
             "user_id": user.user_id,
             "username": user.username,
-            "password_hash": user.password_hash,  # Required by the User model constructor
             "created_at": user.created_at.isoformat(),
             "updated_at": user.updated_at.isoformat(),
         }

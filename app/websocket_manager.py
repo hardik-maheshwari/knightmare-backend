@@ -1,23 +1,24 @@
 import asyncio
 import json
 from collections import defaultdict
-from typing import Any, Optional, Set, Dict, TypedDict, cast
-
+from typing import Any, Optional, Set, Dict, TypedDict, AsyncIterator, cast
 from quart.wrappers import Websocket
 from redis.asyncio.client import PubSub
-from app.auth.repository import AuthRepository
-from app.extensions import AsyncSessionLocal, redis_client
-from app.game.repository import GameRepository
+from app.extensions import redis_client
 from app.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
 
 class RedisPubSubMessage(TypedDict):
+    """
+    Defines the structure of a message received from Redis Pub/Sub
+    when 'decode_responses=True' is used on the connection pool.
+    """
     type: str
-    channel: bytes
-    pattern: Optional[bytes]
-    data: bytes
+    channel: str 
+    pattern: Optional[str] 
+    data: str   
 
 
 class WebSocketManager:
@@ -31,7 +32,7 @@ class WebSocketManager:
         self._local_connections: Dict[str, Set[Websocket]] = defaultdict(set)
 
         self.redis_client = redis_client
-        self.pubsub: PubSub = self.redis_client.pubsub()  # type: ignore
+        self.pubsub: PubSub = self.redis_client.pubsub()
         self._subscribed_games: Set[str] = set()
 
         self.listener_task: asyncio.Task[None] | None = None
@@ -54,67 +55,68 @@ class WebSocketManager:
 
     async def _redis_listener(self):
         """A perpetual background task that listens for published game events."""
+
         logger.info("Redis listener task started.")
+
         while True:
-            if self._subscribed_games:
-                try:
-                    # 1. Wait for a message from a subscribed channel
-                    message = cast(
-                        Optional[RedisPubSubMessage],
-                        await self.pubsub.get_message(
-                            ignore_subscribe_messages=True, timeout=1.0
-                        ),
+            try:
+
+                if self._subscribed_games:
+                    listener: AsyncIterator[RedisPubSubMessage] = cast(
+                        AsyncIterator[RedisPubSubMessage], self.pubsub.listen()
                     )
+                    async for message in listener:
+                        # Check if the message is a real event (not a subscribe/unsubscribe confirmation)
+                        if message and message.get("type") == "message":
+                            channel_str = message["channel"]
+                            game_id = channel_str.split(":", 1)[1]
+                            message_json = message["data"]
 
-                    # 2. Check if the message is a real event
-                    if message and message.get("type") == "message":
+                            logger.debug(
+                                f"Received pub/sub event for game '{game_id}'."
+                            )
 
-                        # The 'data' from Redis is our rich JSON payload (as bytes)
-                        message_json = message["data"]
+                            # Get all local websockets for this specific game
+                            local_sockets = list(
+                                self._local_connections.get(game_id, set())
+                            )
 
-                        # Get the game_id from the channel name (e.g., 'game:XYZ' -> 'XYZ')
-                        channel_str = message["channel"]
-                        game_id = channel_str.split(":", 1)[1]
+                            # Create a list of tasks to send to all sockets concurrently
+                            broadcast_tasks = [
+                                ws.send(message_json) for ws in local_sockets
+                            ]
+                            results = await asyncio.gather(
+                                *broadcast_tasks, return_exceptions=True
+                            )
 
-                        logger.debug(
-                            f"Received pub/sub event for game '{game_id}'. Broadcasting to local clients."
-                        )
+                            # Handle any failed sends (e.g., closed connections)
+                            for i, result in enumerate(results):
+                                if isinstance(result, Exception):
+                                    ws_to_disconnect = local_sockets[i]
+                                    logger.error(
+                                        f"Error sending to websocket for game '{game_id}'. Scheduling disconnect."
+                                    )
+                                    # Don't block, schedule the disconnect to run in the background
+                                    asyncio.create_task(
+                                        self.disconnect(game_id, ws_to_disconnect)
+                                    )
 
-                        # 3. --- This is the logic moved from broadcast_game_state ---
-                        # Get all local websockets for this specific game
-                        local_sockets = list(
-                            self._local_connections.get(game_id, set())
-                        )
+                            logger.info(
+                                f"Broadcasted event to {len(local_sockets)} clients for game '{game_id}'."
+                            )
 
-                        # Loop through them and send the exact message we just received
-                        for ws in local_sockets:
-                            try:
-                                await ws.send(message_json)
-                            except Exception:
-                                logger.error(
-                                    f"Error sending to a websocket for game '{game_id}'. Disconnecting.",
-                                    exc_info=False,
-                                )
-                                # Don't block other broadcasts, schedule the disconnect to run separately
-                                asyncio.create_task(self.disconnect(game_id, ws))
-
-                        logger.info(
-                            f"Broadcasted event to {len(local_sockets)} local clients for game '{game_id}'."
-                        )
-
-                except Exception:
-                    logger.error(
-                        "Error in Redis listener. Re-subscribing in 5s...",
-                        exc_info=True,
-                    )
+                else:
                     await asyncio.sleep(5)
-                    # Re-subscribe logic (your existing code for this is good)
-                    if self._subscribed_games:
-                        channels = [f"game:{gid}" for gid in self._subscribed_games]
-                        await self.pubsub.subscribe(*channels)  # type: ignore
 
-            else:
-                await asyncio.sleep(3)
+            except Exception:
+                logger.error(
+                    "Error in Redis listener. Re-subscribing in 5s...", exc_info=True
+                )
+                await asyncio.sleep(5)
+                # Re-subscribe to all necessary channels upon reconnection
+                if self._subscribed_games:
+                    channels = [f"game:{gid}" for gid in self._subscribed_games]
+                    await self.pubsub.subscribe(*channels)
 
     async def connect(self, game_id: str, websocket: Websocket):
         """Registers a new websocket and subscribes to the game's Redis channel if not already."""
@@ -125,7 +127,7 @@ class WebSocketManager:
             logger.debug(
                 f"First local connection for '{game_id}'. Subscribing to Redis channel."
             )
-            await self.pubsub.subscribe(f"game:{game_id}")  # type: ignore
+            await self.pubsub.subscribe(f"game:{game_id}")
             self._subscribed_games.add(game_id)
 
     async def disconnect(self, game_id: str, websocket: Websocket):
@@ -139,7 +141,7 @@ class WebSocketManager:
                 logger.debug(
                     f"Last local connection for '{game_id}' gone. Unsubscribing."
                 )
-                await self.pubsub.unsubscribe(f"game:{game_id}")  # type: ignore
+                await self.pubsub.unsubscribe(f"game:{game_id}")
                 self._subscribed_games.discard(game_id)
 
     async def publish_event(self, game_id: str, payload: Dict[str, Any]):
@@ -149,7 +151,7 @@ class WebSocketManager:
         channel = f"game:{game_id}"
         message_json = json.dumps(payload)
 
-        await self.redis_client.publish(channel, message_json)  # type: ignore
+        await self.redis_client.publish(channel, message_json)
         logger.info(f"Published '{payload.get('type')}' event to channel '{channel}'.")
 
     async def notify_game_update(self, game_id: str):
@@ -161,42 +163,3 @@ class WebSocketManager:
         logger.info(f"Publishing update notification to Redis channel '{channel}'.")
 
         await self.redis_client.publish(channel, json.dumps({"status": "updated"}))  # type: ignore
-
-    async def broadcast_game_state(self, game_id: str):
-        """
-        Fetches the serialized game state using the repository and broadcasts it
-        to LOCAL clients for that game. Used for initial state sync.
-        """
-        logger.debug(
-            f"--- Broadcasting state for game '{game_id}' to local clients ---"
-        )
-
-        async with AsyncSessionLocal() as db_session:
-            game_repo = GameRepository(db_session)
-            auth_repo = AuthRepository(db_session)
-
-            payload = await game_repo.get_serialized_game_state(game_id, auth_repo)
-
-            if not payload:
-                logger.warning(
-                    f"Broadcast failed: Game '{game_id}' not found during payload creation."
-                )
-                return
-
-            message_json = json.dumps(payload)
-
-        # The rest of the function is just the sending loop, which is unchanged.
-        local_sockets = list(self._local_connections.get(game_id, set()))
-        for ws in local_sockets:
-            try:
-                await ws.send(message_json)
-            except Exception:
-                logger.error(
-                    f"Error sending to a websocket for game '{game_id}'. Disconnecting.",
-                    exc_info=False,
-                )
-                asyncio.create_task(self.disconnect(game_id, ws))
-
-        logger.info(
-            f"Broadcasted initial state to {len(local_sockets)} local clients for game '{game_id}'."
-        )

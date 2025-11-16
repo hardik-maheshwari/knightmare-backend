@@ -1,8 +1,7 @@
-from quart import Quart, Response, g, jsonify, request
-from quart_rate_limiter import RateLimitExceeded
+from quart import Quart, g
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.errors import register_error_handlers
 from .extensions import AsyncSessionLocal, rate_limiter
-from app.common.response_utils import create_error_response
 from app.websocket_manager import WebSocketManager
 import config
 from app.logger_setup import get_logger
@@ -24,7 +23,7 @@ def create_app():
     app.config.from_object(config)
 
     @app.before_request
-    async def open_db_session():  # type: ignore
+    async def open_db_session():
         g.session = AsyncSessionLocal()
         logger.info("DB session opened")
 
@@ -64,32 +63,14 @@ def create_app():
     rate_limiter.init_app(app)
     logger.info("Rate limiter initialized successfully.")
 
-    # --- Register a custom error handler for rate limit exceeded ---
-    @app.errorhandler(RateLimitExceeded)
-    async def handle_rate_limit_exceeded(e: RateLimitExceeded) -> tuple[Response, int]:  # type: ignore
-        """
-        Custom handler for when a rate limit is exceeded.
-        This function is registered with Quart and will be called automatically.
-        """
-        logger.warning(
-            f"Rate limit exceeded for request: {request.method} {request.path}. "
-            f"Client will need to wait {e.retry_after} seconds."
-        )
-
-        response_dict, status_code = create_error_response(
-            f"Rate limit exceeded. Try again in {e.retry_after} seconds.", 429
-        )
-
-        logger.debug(f"Returning 429 Too Many Requests error response.")
-        return jsonify(response_dict), status_code
-
+    register_error_handlers(app)
     logger.debug("Custom error handler for RateLimitExceeded has been registered.")
 
     logger.info("Attaching ws manager")
-    app.ws_manager = WebSocketManager()  # type: ignore
+    app.ws_manager = WebSocketManager()
 
     @app.before_serving
-    async def start_background_tasks():  # type: ignore
+    async def start_background_tasks():
         """
         This function runs once when the app is ready to start serving.
         """

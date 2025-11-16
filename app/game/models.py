@@ -1,6 +1,6 @@
 from typing import Optional
 from sqlalchemy import BIGINT, ForeignKey, Enum, VARCHAR
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column,relationship
 from ..extensions import Base
 from app.common.types import (
     int_pk,
@@ -46,6 +46,9 @@ class Game(Base, TimestampMixin):
     status: Mapped[GameStatus] = mapped_column(
         Enum(GameStatus), nullable=False, default=GameStatus.WAITING_FOR_OPPONENT
     )
+    
+    white_player = relationship("User", foreign_keys=[white_player_id])
+    black_player = relationship("User", foreign_keys=[black_player_id])
 
     def __repr__(self) -> str:
         return f"<Game game_id={self.game_id} status='{self.status.value}'>"

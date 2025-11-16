@@ -1,10 +1,8 @@
 import datetime
-from typing import Dict, Any
-import jwt
 from quart import Blueprint, g, jsonify, request, current_app
 from quart_bcrypt import Bcrypt
-from app.auth.exceptions import InvalidCredentialsError, UsernameTakenError
-from app.logger_setup import get_logger  # type: ignore
+from app.auth.auth_facade import AuthFacade
+from app.logger_setup import get_logger
 from app.common.response_utils import create_error_response, create_success_response
 from .validators import *
 from quart_rate_limiter import rate_limit
@@ -37,45 +35,22 @@ async def register_user():
         username, password = await user_input_validator(request)
         logger.debug(f"Input for username '{username}' passed validation.")
 
-        hashed_password = await bcrypt.async_generate_password_hash(password)  # type: ignore
-        logger.debug("Password hashed successfully.")
-
-        # 2. Database Interaction
         session: AsyncSession = g.session
-        repo = AuthRepository(session)
+        auth_repo = AuthRepository(session)
+        secret_key = current_app.config["SECRET_KEY"]  # type: ignore
+        auth_facade = AuthFacade(auth_repo, bcrypt, secret_key)  # type: ignore
 
-        logger.debug(f"Checking for existing user '{username}'...")
-        existing_user = await repo.get_user_by_username(username)  # type: ignore
-
-        if existing_user:
-            raise UsernameTakenError(f"Username '{username}' is already taken.")
-
-        logger.debug(f"Username '{username}' is available. Creating new user object.")
-        new_user = User(
-            username=username,
-            password_hash=hashed_password.decode("utf-8"),
-        )
-
-        created_user = await repo.create_user(new_user)
+        # 3. Delegate the entire business process to the facade.
+        created_user = await auth_facade.register(username, password)
 
         logger.info(
             f"User '{username}' created successfully with ID: {created_user.user_id}."
         )
 
         response_dict, status_code = create_success_response(
-            data={"message": f"User '{username}' created successfully."},
+            data={"message": f"User '{created_user.username}' created successfully."},
             status_code=201,
         )
-        return jsonify(response_dict), status_code
-
-    except ValidationError as e:
-        logger.warning(f"Input validation failed: {e.message}")
-        response, status = create_error_response(e.message, e.status_code)
-        return jsonify(response), status
-
-    except UsernameTakenError as e:
-        logger.warning(f"Registration failed for '{username}': {e}")
-        response_dict, status_code = create_error_response(str(e), 409)
         return jsonify(response_dict), status_code
 
     except Exception as e:
@@ -104,53 +79,16 @@ async def login():
         username, password = await user_input_validator(request)
         logger.debug(f"Input for username '{username}' passed validation.")
         session: AsyncSession = g.session
-        repo = AuthRepository(session)
+        auth_repo = AuthRepository(session)
+        secret_key = current_app.config["SECRET_KEY"]  # type: ignore
+        auth_facade = AuthFacade(auth_repo, bcrypt, secret_key)  # type: ignore
 
-        # 2. Find the user
-        logger.debug(f"Attempting to find user '{username}'...")
-        existing_user = await repo.get_user_by_username(username)  # type: ignore
+        token = await auth_facade.login(username, password)
 
-        if not existing_user:
-            raise InvalidCredentialsError()
-
-        # 3. Check password
-        logger.debug(
-            f"User found. Checking password for user ID: {existing_user.user_id}"
-        )
-        is_password_correct = await bcrypt.async_check_password_hash(
-            existing_user.password_hash, password  # type: ignore
-        )
-
-        if not is_password_correct:
-            raise InvalidCredentialsError()
-
-        # 4. Generate JWT
-        logger.debug("Password is correct. Generating JWT.")
-        payload: Dict[str, Any] = {
-            "user_id": existing_user.user_id,
-            "exp": datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=24),
-            "iat": datetime.datetime.now(datetime.timezone.utc),
-        }
-        token = jwt.encode(
-            payload, current_app.config["SECRET_KEY"], algorithm="HS256"  # type: ignore
-        )
         logger.info(f"User '{username}' logged in successfully.")
 
         response_dict, status_code = create_success_response(data={"token": token})
         return jsonify(response_dict), status_code
-
-    except ValidationError as e:
-
-        logger.warning(f"Login validation failed: {e.message}")
-        response, status = create_error_response(e.message, e.status_code)
-        return jsonify(response), status
-
-    except InvalidCredentialsError:
-        err_msg = "Invalid username or password."
-        logger.warning(f"Login failed for user '{username}': {err_msg}")
-        response, status = create_error_response(err_msg, 401)
-        return jsonify(response), status
 
     except Exception as e:
         log_username = f"for '{username}'" if username else ""
