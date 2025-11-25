@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any, Dict
 import httpx
 import websockets
 import redis.asyncio as redis
@@ -12,7 +13,7 @@ KYOYA_CREDS = {"username": "kyoya", "password": "leone123"}
 RYUGA_CREDS = {"username": "ryuga", "password": "ldrago456"}
 
 # --- Helper Functions ---
-async def get_token(client: httpx.AsyncClient, creds: dict) -> str:
+async def get_token(client: httpx.AsyncClient, creds: Dict[str,str]) -> str:
     """Logs in a user and returns their token."""
     resp = await client.post(f"{BASE_URL}/api/auth/login/", json=creds)
     resp.raise_for_status()
@@ -47,7 +48,8 @@ async def main():
         print("Game is now ACTIVE.")
 
         # 2. LISTENER SETUP: One player (Ryuga) will listen for all game events.
-        final_checkmate_event = asyncio.Future()
+        final_checkmate_event: asyncio.Future[Dict[str, Any]] = asyncio.Future()
+        print(f"The type of final_checkmate_event is {final_checkmate_event}")
 
         async def game_event_listener():
             # Get a ticket for Ryuga to connect
@@ -113,7 +115,7 @@ async def main():
             
             assert final_data["status"] == "white_win"
             assert final_data["is_checkmate"] is True
-            assert len(final_data["moves"]) == 7
+            assert final_data["last_move"] == "h5f7"
 
             print("\n✅ SUCCESS: WebSocket listener received the correct 'white_win' and 'is_checkmate' flags.")
             
@@ -126,8 +128,8 @@ async def main():
 if __name__ == "__main__":
     # Clean up DB and Redis before starting
     try:
-        r = redis.from_url(REDIS_URL, decode_responses=True)
-        asyncio.run(r.flushdb())
+        r = redis.from_url(REDIS_URL, decode_responses=True) # type: ignore
+        asyncio.run(r.flushdb()) # type: ignore
         print("--- Redis cache flushed. ---")
         # Add DB cleanup here if needed, but the test handles new users each time
     except Exception as e:

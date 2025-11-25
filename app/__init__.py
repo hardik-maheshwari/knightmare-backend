@@ -1,9 +1,11 @@
+import config
 from quart import Quart, g
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import register_error_handlers
 from .extensions import AsyncSessionLocal, rate_limiter
-from app.websocket_manager import WebSocketManager
-import config
+from app.extensions import redis_client
+from app.managers.game_manager import GameWebSocketManager
+from app.pubsub.providers.redis_pubsub_provider import RedisPubSubProvider
 from app.logger_setup import get_logger
 from quart_cors import cors  # type: ignore
 
@@ -49,15 +51,14 @@ def create_app():
     from main_routes import main_bp
     from .auth.routes import auth_bp
     from .game.routes import game_bp
+    from .game.ws_routes import ws_bp
 
-    app.register_blueprint(main_bp)
-    logger.debug("Registered 'main_bp'.")
-
-    app.register_blueprint(auth_bp)
-    logger.debug("Registered 'auth_bp'.")
-
-    app.register_blueprint(game_bp)
-    logger.debug("Registered 'game_bp'.")
+    app.register_blueprint(cors(main_bp, allow_origin="*"))
+    app.register_blueprint(cors(auth_bp, allow_origin="*"))
+    app.register_blueprint(cors(game_bp, allow_origin="*"))
+    
+    app.register_blueprint(ws_bp)
+    logger.debug("Registered 'ws_bp' (No CORS).")
 
     logger.debug("Initializing extensions (Rate Limiter)...")
     rate_limiter.init_app(app)
@@ -67,7 +68,9 @@ def create_app():
     logger.debug("Custom error handler for RateLimitExceeded has been registered.")
 
     logger.info("Attaching ws manager")
-    app.ws_manager = WebSocketManager()
+    pubsub_provider = RedisPubSubProvider(redis_client)
+
+    app.ws_manager = GameWebSocketManager(pubsub_provider)  # type: ignore
 
     @app.before_serving
     async def start_background_tasks():

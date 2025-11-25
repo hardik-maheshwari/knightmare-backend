@@ -11,7 +11,7 @@ from app.game.exceptions import (
 from app.game.models import Game, GameStatus, Move, PlayerColor
 from app.game.repository import GameRepository
 from app.auth.repository import AuthRepository
-from app.websocket_manager import WebSocketManager
+from app.managers.game_manager import GameWebSocketManager
 from app.logger_setup import get_logger
 
 from app.game.rules.context import MoveContext
@@ -30,7 +30,7 @@ class GameFacade:
         self,
         game_repo: GameRepository,
         auth_repo: AuthRepository,
-        ws_manager: WebSocketManager,
+        ws_manager: GameWebSocketManager,
     ):
         self.game_repo = game_repo
         self.auth_repo = auth_repo
@@ -159,7 +159,7 @@ class GameFacade:
             game.black_player_id = joining_player.user_id
 
         game.status = GameStatus.ACTIVE
-        
+
         # 1. Send the UPDATE SQL to the database
         await self.game_repo.session.flush()
 
