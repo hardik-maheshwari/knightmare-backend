@@ -38,8 +38,8 @@ class GameRepository:
         logger.debug("Flushing session to save game to the database.")
         await self.session.flush()
 
-        logger.debug("Refreshing game instance to get DB defaults.")
-        await self.session.refresh(game)
+        # logger.debug("Refreshing game instance to get DB defaults.")
+        # await self.session.refresh(game)
 
         return game
 
@@ -94,8 +94,8 @@ class GameRepository:
         logger.debug(f"Flushing session to save move for game '{move.game_id}'.")
         await self.session.flush()
 
-        logger.debug(f"Refreshing move instance '{move.move_id}' to get DB defaults.")
-        await self.session.refresh(move)
+        # logger.debug(f"Refreshing move instance '{move.move_id}' to get DB defaults.")
+        # await self.session.refresh(move)
 
         return move
 

@@ -15,10 +15,11 @@ class RedisPubSubMessage(TypedDict):
     Defines the structure of a message received from Redis Pub/Sub
     when 'decode_responses=True' is used on the connection pool.
     """
+
     type: str
-    channel: str 
-    pattern: Optional[str] 
-    data: str   
+    channel: str
+    pattern: Optional[str]
+    data: str
 
 
 class WebSocketManager:
@@ -32,7 +33,7 @@ class WebSocketManager:
         self._local_connections: Dict[str, Set[Websocket]] = defaultdict(set)
 
         self.redis_client = redis_client
-        self.pubsub: PubSub = self.redis_client.pubsub()
+        self.pubsub: PubSub = self.redis_client.pubsub() # type: ignore
         self._subscribed_games: Set[str] = set()
 
         self.listener_task: asyncio.Task[None] | None = None
@@ -63,7 +64,7 @@ class WebSocketManager:
 
                 if self._subscribed_games:
                     listener: AsyncIterator[RedisPubSubMessage] = cast(
-                        AsyncIterator[RedisPubSubMessage], self.pubsub.listen()
+                        AsyncIterator[RedisPubSubMessage], self.pubsub.listen() # type: ignore
                     )
                     async for message in listener:
                         # Check if the message is a real event (not a subscribe/unsubscribe confirmation)
@@ -116,7 +117,7 @@ class WebSocketManager:
                 # Re-subscribe to all necessary channels upon reconnection
                 if self._subscribed_games:
                     channels = [f"game:{gid}" for gid in self._subscribed_games]
-                    await self.pubsub.subscribe(*channels)
+                    await self.pubsub.subscribe(*channels) # type: ignore
 
     async def connect(self, game_id: str, websocket: Websocket):
         """Registers a new websocket and subscribes to the game's Redis channel if not already."""
@@ -127,7 +128,7 @@ class WebSocketManager:
             logger.debug(
                 f"First local connection for '{game_id}'. Subscribing to Redis channel."
             )
-            await self.pubsub.subscribe(f"game:{game_id}")
+            await self.pubsub.subscribe(f"game:{game_id}") # type: ignore
             self._subscribed_games.add(game_id)
 
     async def disconnect(self, game_id: str, websocket: Websocket):
@@ -141,7 +142,7 @@ class WebSocketManager:
                 logger.debug(
                     f"Last local connection for '{game_id}' gone. Unsubscribing."
                 )
-                await self.pubsub.unsubscribe(f"game:{game_id}")
+                await self.pubsub.unsubscribe(f"game:{game_id}") # type: ignore
                 self._subscribed_games.discard(game_id)
 
     async def publish_event(self, game_id: str, payload: Dict[str, Any]):
@@ -151,7 +152,7 @@ class WebSocketManager:
         channel = f"game:{game_id}"
         message_json = json.dumps(payload)
 
-        await self.redis_client.publish(channel, message_json)
+        await self.redis_client.publish(channel, message_json) # type: ignore
         logger.info(f"Published '{payload.get('type')}' event to channel '{channel}'.")
 
     async def notify_game_update(self, game_id: str):

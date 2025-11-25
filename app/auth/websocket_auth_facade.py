@@ -12,7 +12,10 @@ logger = get_logger(__name__)
 
 class WebSocketAuthFacade:
     def __init__(
-        self, auth_repo: AuthRepository, game_repo: GameRepository, redis_client: AsyncRedis
+        self,
+        auth_repo: AuthRepository,
+        game_repo: GameRepository,
+        redis_client: AsyncRedis,
     ):
         self.auth_repo = auth_repo
         self.game_repo = game_repo

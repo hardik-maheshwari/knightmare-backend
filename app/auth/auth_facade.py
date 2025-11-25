@@ -52,8 +52,7 @@ class AuthFacade:
             f"FACADE: User '{username}' registration orchestrated successfully. ID: {created_user.user_id}"
         )
         return created_user
-    
-    
+
     async def login(self, username: str, password: str) -> str:
         """
         Orchestrates user login and authentication, returning a JWT on success.
@@ -87,9 +86,7 @@ class AuthFacade:
         }
 
         # 4. Encode the token with the injected secret key.
-        token = jwt.encode(
-            payload, self.secret_key, algorithm="HS256"
-        )
+        token = jwt.encode(payload, self.secret_key, algorithm="HS256")
 
         logger.info(f"FACADE: User '{username}' authenticated successfully.")
         return token

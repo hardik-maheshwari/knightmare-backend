@@ -64,12 +64,13 @@ class LoggerConfig(metaclass=SingletonMeta):
         coloredlogs.install(  # type: ignore
             level=log_level,
             logger=root_logger,
-            fmt="%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - [%(funcName)s] - %(message)s",
+            # fmt="%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - [%(funcName)s] - %(message)s",
+            fmt="%(name)s:%(lineno)d - %(levelname)s - [%(funcName)s] - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
             field_styles=field_styles,
             level_styles=level_styles,
         )
-        
+
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 

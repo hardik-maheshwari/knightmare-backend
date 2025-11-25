@@ -9,4 +9,5 @@ class ValidationError(Exception):
 
 class CacheMissError(Exception):
     """Internal exception to signal that a required item was not in the cache."""
+
     pass

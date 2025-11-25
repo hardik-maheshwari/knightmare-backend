@@ -1,6 +1,6 @@
 from typing import Optional
 from sqlalchemy import BIGINT, ForeignKey, Enum, VARCHAR
-from sqlalchemy.orm import Mapped, mapped_column,relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..extensions import Base
 from app.common.types import (
     int_pk,
@@ -12,6 +12,7 @@ from app.common.types import (
 )
 from app.common.mixins import TimestampMixin
 import enum
+import chess
 
 
 # --- Enums ---
@@ -46,9 +47,16 @@ class Game(Base, TimestampMixin):
     status: Mapped[GameStatus] = mapped_column(
         Enum(GameStatus), nullable=False, default=GameStatus.WAITING_FOR_OPPONENT
     )
-    
+
     white_player = relationship("User", foreign_keys=[white_player_id])
     black_player = relationship("User", foreign_keys=[black_player_id])
+
+    current_fen: Mapped[str_100] = mapped_column(
+        VARCHAR(100),
+        nullable=False,
+        default=chess.STARTING_FEN,
+        server_default=chess.STARTING_FEN,
+    )
 
     def __repr__(self) -> str:
         return f"<Game game_id={self.game_id} status='{self.status.value}'>"

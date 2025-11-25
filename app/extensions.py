@@ -10,7 +10,7 @@ from redis.asyncio.client import Redis
 
 async_engine = create_async_engine(
     config.DATABASE_URL,
-    echo=False,
+    echo=True,
 )
 
 AsyncSessionLocal = async_sessionmaker(

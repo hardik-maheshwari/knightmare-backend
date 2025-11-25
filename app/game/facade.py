@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, cast
 
 import chess
 from app.auth.models import User
@@ -7,14 +7,20 @@ from app.game.exceptions import (
     AlreadyInGameError,
     GameNotFoundError,
     GameNotJoinableError,
-    MoveNotPossibleError,
-    UserNotPlayerError,
 )
 from app.game.models import Game, GameStatus, Move, PlayerColor
 from app.game.repository import GameRepository
 from app.auth.repository import AuthRepository
 from app.websocket_manager import WebSocketManager
 from app.logger_setup import get_logger
+
+from app.game.rules.context import MoveContext
+from app.game.rules.handlers import (
+    GameActiveRule,
+    PlayerAuthRule,
+    TurnRule,
+    LegalMoveRule,
+)
 
 logger = get_logger(__name__)
 
@@ -64,24 +70,32 @@ class GameFacade:
         # 5. Return the persisted object.
         return created_game
 
-    async def get_serialized_game_state(self, game_id: str) -> Dict[str, Any]:
+    async def get_serialized_game_state(
+        self, game_id: str, game_obj: Optional[Game] = None
+    ) -> Dict[str, Any]:
         """
         Assembles the rich game state payload for WebSocket broadcasts.
         """
         # 1. Call the efficient repository method to get the game and its players.
-        game = await self.game_repo.get_game_with_players(game_id)
-
-        if not game:
-            logger.warning(f"Failed to serialize state: Game '{game_id}' not found.")
-            raise GameNotFoundError(f"Game with ID {game_id} not found.")
+        if game_obj:
+            game = game_obj
+        else:
+            # Fallback: fetch if not provided (e.g. when called from other contexts)
+            game = await self.game_repo.get_game_with_players(game_id)
+            if not game:
+                logger.warning(
+                    f"Failed to serialize state: Game '{game_id}' not found."
+                )
+                raise GameNotFoundError(f"Game with ID {game_id} not found.")
 
         # 2. Fetch the game's moves.
         moves = await self.game_repo.get_moves_for_game(game_id)
 
         # 3. Calculate board state from the moves.
-        current_fen = (
-            chess.STARTING_FEN if not moves else moves[-1].board_fen_after_move
-        )
+        # current_fen = (
+        #     chess.STARTING_FEN if not moves else moves[-1].board_fen_after_move
+        # )
+        current_fen = game.current_fen
         board = chess.Board(current_fen)
 
         # 4. Prepare the player data dictionaries from the eagerly loaded objects.
@@ -124,7 +138,7 @@ class GameFacade:
         return payload
 
     async def join_game(self, game_id: str, joining_player: User) -> Game:
-        game = await self.game_repo.get_game_by_id(game_id)
+        game = await self.game_repo.get_game_with_players(game_id)
 
         if game is None:
             raise GameNotFoundError(f"Game with ID {game_id} not found.")
@@ -145,28 +159,25 @@ class GameFacade:
             game.black_player_id = joining_player.user_id
 
         game.status = GameStatus.ACTIVE
+        
+        # 1. Send the UPDATE SQL to the database
+        await self.game_repo.session.flush()
+
+        # Since we just flushed an UPDATE, and updated_at is server_default/onupdate,
+        # SQLAlchemy marks it as expired. Accessing it requires IO.
+        # In Async, implicit IO is banned. We MUST refresh explicitly here.
+        await self.game_repo.session.refresh(game)
 
         logger.info(
             f"User {joining_player.user_id} joined game {game_id}. Game is now ACTIVE."
         )
 
-        rich_event_payload = await self.get_serialized_game_state(game_id)
+        rich_event_payload = await self.get_serialized_game_state(
+            game_id, game_obj=game
+        )
 
         await self.ws_manager.publish_event(game_id, rich_event_payload)
 
-        return game
-
-    async def _get_and_validate_game_state(self, game_id: str, player: User) -> Game:
-        """Fetches the game and runs pre-condition checks."""
-        game = await self.game_repo.get_game_by_id(game_id)
-        if not game:
-            raise GameNotFoundError(f"Game with ID {game_id} not found.")
-        if game.status != GameStatus.ACTIVE:
-            raise MoveNotPossibleError(
-                f"Game is not active. Status: {game.status.value}"
-            )
-        if player.user_id not in (game.white_player_id, game.black_player_id):
-            raise UserNotPlayerError("You are not a player in this game.")
         return game
 
     async def _load_board_from_history(
@@ -179,26 +190,6 @@ class GameFacade:
         )
         logger.debug(f"Loading board with FEN: {current_fen}")
         return chess.Board(current_fen), latest_move
-
-    def _validate_move_legality(
-        self, board: chess.Board, move_uci: str, player: User, game: Game
-    ) -> chess.Move:
-        """Validates the move against game rules (turn order, legality)."""
-        is_whites_turn = board.turn == chess.WHITE
-        if (is_whites_turn and player.user_id != game.white_player_id) or (
-            not is_whites_turn and player.user_id != game.black_player_id
-        ):
-            raise MoveNotPossibleError("It is not your turn.")
-
-        try:
-            move_object = chess.Move.from_uci(move_uci)
-
-            if move_object not in board.legal_moves:
-                raise chess.IllegalMoveError("Move is not in the list of legal moves.")
-            return move_object
-        except (ValueError, chess.IllegalMoveError) as e:
-            logger.warning(f"Illegal move '{move_uci}' attempted. Reason: {e}")
-            raise MoveNotPossibleError(f"Illegal move: {move_uci}")
 
     def _get_captured_piece_symbol(
         self, board: chess.Board, move: chess.Move
@@ -288,27 +279,98 @@ class GameFacade:
         logger.debug(f"Created new unsaved Move object: {new_move.move_notation}")
         return new_move
 
+    def _build_websocket_payload(self, game: Game, latest_move: Move) -> Dict[str, Any]:
+        """
+        Lightweight serializer for broadcasts.
+        O(1) Complexity. Uses game.current_fen and avoids fetching history.
+        """
+        # We use the stored FEN to create the board object instantly
+        board = chess.Board(game.current_fen)
+
+        white_player_data = None
+        if game.white_player:
+            white_player_data = {
+                "id": game.white_player.user_id,
+                "username": game.white_player.username,
+            }
+
+        black_player_data = None
+        if game.black_player:
+            black_player_data = {
+                "id": game.black_player.user_id,
+                "username": game.black_player.username,
+            }
+
+        return {
+            "type": "game_update",
+            "data": {
+                "game_id": game.game_id,
+                "white_player": white_player_data,
+                "black_player": black_player_data,
+                "status": game.status.value,
+                "current_fen": game.current_fen,  # Use the column!
+                "turn": "w" if board.turn == chess.WHITE else "b",
+                "is_check": board.is_check(),
+                "is_checkmate": board.is_checkmate(),
+                "is_draw": board.is_stalemate() or board.is_insufficient_material(),
+                # OPTIMIZATION: We only send the latest move, not the whole list.
+                # The frontend should append this to its local list.
+                "last_move": latest_move.move_notation,
+                "moves": [],  # We send empty list or remove it to signal "no history sent"
+            },
+        }
+
     async def make_move(self, game_id: str, player: User, move_uci: str) -> Move:
         """
-        Orchestrates the entire process of making a move.
-        It calls a series of private helpers to perform validation and state changes.
+        Orchestrates the entire process of making a move using Chain of Responsibility
+        for validation.
         """
         logger.debug(
             f"--- make_move orchestrator started for game '{game_id}' by user '{player.username}' ---"
         )
 
-        game = await self._get_and_validate_game_state(game_id, player)
+        # 1. Fetch Data (Repositories)
+
+        game = await self.game_repo.get_game_with_players(game_id)
+        if not game:
+            raise GameNotFoundError(f"Game with ID {game_id} not found.")
 
         board, latest_move = await self._load_board_from_history(game_id)
 
-        move_object = self._validate_move_legality(board, move_uci, player, game)
+        # 2. Create Context
+        # Package all necessary data into our Context Object
+        move_context = MoveContext(
+            game=game,
+            player=player,
+            move_uci=move_uci,
+            board=board,
+            latest_move_db=latest_move,
+        )
 
-        # 4. Apply the move to the board and update the game's overall status.
+        # 3. Build & Execute Validation Chain
+        # We link the rules in specific order:
+        # Active? -> Authorized? -> Turn? -> Legal?
+        validation_chain = GameActiveRule()
+        validation_chain.set_next(PlayerAuthRule()).set_next(TurnRule()).set_next(
+            LegalMoveRule()
+        )
+
+        # This will RAISE an exception if any rule fails.
+        # It will also ENRICH the context (ctx.parsed_move) if it succeeds.
+        validation_chain.check(move_context)
+
+        # 4. Retrieve Enriched Data
+        # We trust LegalMoveRule to have populated this
+        move_object = cast(chess.Move, move_context.parsed_move)
+
+        # 5. Execute Side Effects (State Mutation)
         captured_piece_symbol = self._get_captured_piece_symbol(board, move_object)
-        board.push(move_object)
-        self._update_game_status(game, board)
 
-        # 5. Persist the new move to the database.
+        board.push(move_object)  # Update board state
+        self._update_game_status(game, board)  # Check for checkmate/draw
+        game.current_fen = board.fen()
+
+        # 6. Persist
         new_move = self._create_new_move(
             game=game,
             board=board,
@@ -320,62 +382,10 @@ class GameFacade:
 
         await self.game_repo.save_move(new_move)
 
-        rich_event_payload = await self.get_serialized_game_state(game_id)
+        # 7. Broadcast
+        ws_payload = self._build_websocket_payload(game, new_move)
 
-        await self.ws_manager.publish_event(game_id, rich_event_payload)
+        await self.ws_manager.publish_event(game_id, ws_payload)
 
         logger.info(f"Move '{move_uci}' successfully processed for game '{game_id}'.")
         return new_move
-    
-    async def get_game_details(self, game_id: str, requesting_user: User) -> Dict[str, Any]:
-        """
-        Fetches the detailed history and state of a game, ensuring the
-        requesting user has permission to view it.
-        """
-        logger.debug(f"FACADE: Getting details for game '{game_id}' for user '{requesting_user.username}'.")
-
-        # 1. Fetch the game.
-        game = await self.game_repo.get_game_by_id(game_id)
-        if not game:
-            raise GameNotFoundError(f"Game with ID {game_id} not found.")
-
-        # 2. Business Logic: Authorize the user.
-        is_player = (
-            requesting_user.user_id == game.white_player_id
-            or requesting_user.user_id == game.black_player_id
-        )
-        if not is_player:
-            logger.warning(f"FORBIDDEN: User '{requesting_user.username}' attempted to access game '{game_id}'.")
-            raise UserNotPlayerError("You are not authorized to view this game.")
-
-        # 3. Fetch related data.
-        moves = await self.game_repo.get_moves_for_game(game_id)
-
-        # 4. Domain Logic: Calculate current board state.
-        current_fen = chess.STARTING_FEN if not moves else moves[-1].board_fen_after_move
-        board = chess.Board(current_fen)
-        turn = "w" if board.turn == chess.WHITE else "b"
-
-        # 5. DTO Assembly: Prepare the final payload.
-        serializable_moves : List[Any] = [
-            {
-                "move_id": move.move_id,
-                "move_number": move.move_number,
-                "player_color": move.player_color.value,
-                "move_notation": move.move_notation,
-                "created_at": move.created_at.isoformat(),
-            }
-            for move in moves
-        ]
-
-        response_data: Dict[str, Any] = {
-            "game_id": game_id,
-            "white_player_id": game.white_player_id,
-            "black_player_id": game.black_player_id,
-            "status": game.status.value,
-            "current_fen": current_fen,
-            "turn": turn,
-            "moves": serializable_moves,
-        }
-
-        return response_data

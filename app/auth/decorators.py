@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 RouteCallable = Callable[..., Awaitable[tuple[Response, int]]]
 
+
 def token_required(f: RouteCallable) -> RouteCallable:
     """
     A decorator to ensure a valid JWT is present and provides the user.

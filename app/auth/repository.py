@@ -65,12 +65,12 @@ class AuthRepository:
         logger.debug("Flushing session to send INSERT to the database.")
         await self.session.flush()
 
-        logger.debug(
-            f"Refreshing user instance to get new DB-generated values (ID, timestamps)."
-        )
-        await self.session.refresh(user)
+        # logger.debug(
+        #     f"Refreshing user instance to get new DB-generated values (ID, timestamps)."
+        # )
+        # await self.session.refresh(user)
 
-        logger.debug(f"User instance after refresh: {user}")
+        # logger.debug(f"User instance after refresh: {user}")
         return user
 
     async def get_user_by_id_with_cache(self, user_id: int) -> Optional[User]:
