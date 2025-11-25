@@ -56,7 +56,7 @@ def create_app():
     app.register_blueprint(cors(main_bp, allow_origin="*"))
     app.register_blueprint(cors(auth_bp, allow_origin="*"))
     app.register_blueprint(cors(game_bp, allow_origin="*"))
-    
+
     app.register_blueprint(ws_bp)
     logger.debug("Registered 'ws_bp' (No CORS).")
 

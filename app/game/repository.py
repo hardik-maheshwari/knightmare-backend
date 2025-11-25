@@ -43,16 +43,22 @@ class GameRepository:
 
         return game
 
-    async def get_game_with_players(self, game_id: str) -> Optional[Game]:
+    async def get_game_with_players(
+        self, game_id: str, for_update: bool = False
+    ) -> Optional[Game]:
         """
-        Fetches a game and eagerly loads its related player objects
-        in a single database query using JOINs.
+        Fetches a game and eagerly loads its related player objects.
+        If for_update=True, locks the row (SELECT ... FOR UPDATE).
         """
         statement = (
             select(Game)
             .where(Game.game_id == game_id)
             .options(joinedload(Game.white_player), joinedload(Game.black_player))
         )
+
+        if for_update:
+            logger.debug(f"🔒 Locking game row '{game_id}' for update.")
+            statement = statement.with_for_update(of=Game)
 
         result = await self.session.execute(statement)
         game = result.scalars().first()

@@ -1,19 +1,18 @@
-from typing import Any, Dict, cast
-from quart import Blueprint, current_app, jsonify, g, request
+from typing import Any, Dict
+from quart import Blueprint, jsonify, g, request
 
 from app.auth.models import User
 from app.auth.decorators import token_required
 from app.auth.repository import AuthRepository
 from app.auth.websocket_auth_facade import WebSocketAuthFacade
-from app.common.exceptions import ValidationError
 from app.common.response_utils import create_success_response, create_error_response
+from app.common.schemas import MoveRequest
 from app.extensions import redis_client
+from pydantic import ValidationError as PydanticValidationError
 
 # from app.game.models import Game
-
-from app.game.facade import GameFacade
+from app.dependency_injection import get_container
 from app.logger_setup import get_logger
-from app.managers.game_manager import GameWebSocketManager
 from .repository import GameRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,11 +60,8 @@ async def create_game(current_user: User):
     try:
 
         session: AsyncSession = g.session
-        game_repo = GameRepository(session)
-        auth_repo = AuthRepository(session)  # Still needed by the facade
-        ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
-
-        facade = GameFacade(game_repo, auth_repo, ws_manager)
+        container = get_container(session)
+        facade = container.get_game_facade()
 
         new_game = await facade.create_game(creator=current_user)
 
@@ -107,11 +103,8 @@ async def join_game_route(game_id: str, current_user: User):
 
     try:
         session: AsyncSession = g.session
-        game_repo = GameRepository(session)
-        auth_repo = AuthRepository(session)
-        ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
-
-        facade = GameFacade(game_repo, auth_repo, ws_manager)
+        container = get_container(session)
+        facade = container.get_game_facade()
 
         updated_game = await facade.join_game(game_id, current_user)
 
@@ -149,10 +142,8 @@ async def get_game_history(game_id: str, current_user: User):
     try:
         session: AsyncSession = g.session
 
-        game_repo = GameRepository(session)
-
-        ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
-        facade = GameFacade(game_repo, AuthRepository(session), ws_manager)
+        container = get_container(session)
+        facade = container.get_game_facade()
 
         game_details = await facade.get_game_details(game_id, current_user)  # type: ignore
 
@@ -178,18 +169,13 @@ async def make_move_route(game_id: str, current_user: User):
     )
 
     try:
+        body = await request.get_json()
+        # Automatic Regex validation for UCI format happens here!
+        validated_data = MoveRequest(**body)
+        move_uci = validated_data.move
         session = g.session
-        game_repo = GameRepository(session)
-        auth_repo = AuthRepository(session)
-
-        ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
-        facade = GameFacade(game_repo, auth_repo, ws_manager)
-
-        json_data = await request.get_json()
-        if not json_data or "move" not in json_data:
-            raise ValidationError("Request body must include a 'move' field.")
-
-        move_uci = json_data["move"]
+        container = get_container(session)
+        facade = container.get_game_facade()
 
         await facade.make_move(game_id, current_user, move_uci)
 
@@ -197,6 +183,17 @@ async def make_move_route(game_id: str, current_user: User):
             data={"message": "Move successfully recorded"}, status_code=201
         )
         return jsonify(response), status
+
+    except PydanticValidationError as e:
+        # Clean error handling for invalid input
+        logger.warning(f"Validation failed: {e.errors()}")
+        # We take the first error message to show the user
+        msg = e.errors()[0]["msg"]
+        field = e.errors()[0]["loc"][0]
+        response_dict, status_code = create_error_response(
+            f"Invalid {field}: {msg}", 400
+        )
+        return jsonify(response_dict), status_code
 
     except Exception as e:
 

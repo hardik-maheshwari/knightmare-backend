@@ -7,6 +7,7 @@ from app.auth.exceptions import InvalidCredentialsError, UserNotFoundError
 from app.auth.models import User
 from app.auth.repository import AuthRepository
 from app.auth.websocket_auth_facade import WebSocketAuthFacade
+from app.dependency_injection import get_container
 from app.extensions import AsyncSessionLocal, redis_client
 from app.game.exceptions import GameNotFoundError
 from app.game.facade import GameFacade
@@ -36,12 +37,9 @@ async def game_websocket(game_id: str):
     async with AsyncSessionLocal() as session:
         try:
             # 1. Instantiate Dependencies
-            auth_repo = AuthRepository(session)
-            game_repo = GameRepository(session)
-
-            # The services that contain our business logic
-            ws_auth_service = WebSocketAuthFacade(auth_repo, game_repo, redis_client)
-            game_facade = GameFacade(game_repo, auth_repo, ws_manager)
+            container = get_container(session)
+            ws_auth_service = container.get_ws_auth_facade()
+            game_facade = container.get_game_facade()
 
             # 2. Authenticate the connection using the dedicated service
             ticket = ws.args.get("ticket")

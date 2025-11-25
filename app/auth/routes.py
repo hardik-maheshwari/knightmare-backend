@@ -2,14 +2,15 @@ import datetime
 from quart import Blueprint, g, jsonify, request, current_app
 from quart_bcrypt import Bcrypt
 from app.auth.auth_facade import AuthFacade
+from app.common.schemas import UserAuthRequest
 from app.logger_setup import get_logger
 from app.common.response_utils import create_error_response, create_success_response
-from .validators import *
 from quart_rate_limiter import rate_limit
 from .models import User
 from .repository import AuthRepository
 from .decorators import token_required
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import ValidationError as PydanticValidationError
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 logger = get_logger(__name__)
@@ -32,7 +33,13 @@ async def register_user():
 
     try:
         # 1. Validation
-        username, password = await user_input_validator(request)
+        body = await request.get_json()
+        validated_data = UserAuthRequest(**body)
+
+        # Access clean data as attributes (IDE autocomplete works now!)
+        username = validated_data.username
+        password = validated_data.password
+
         logger.debug(f"Input for username '{username}' passed validation.")
 
         session: AsyncSession = g.session
@@ -50,6 +57,17 @@ async def register_user():
         response_dict, status_code = create_success_response(
             data={"message": f"User '{created_user.username}' created successfully."},
             status_code=201,
+        )
+        return jsonify(response_dict), status_code
+
+    except PydanticValidationError as e:
+        # Clean error handling for invalid input
+        logger.warning(f"Validation failed: {e.errors()}")
+        # We take the first error message to show the user
+        msg = e.errors()[0]["msg"]
+        field = e.errors()[0]["loc"][0]
+        response_dict, status_code = create_error_response(
+            f"Invalid {field}: {msg}", 400
         )
         return jsonify(response_dict), status_code
 
@@ -76,7 +94,12 @@ async def login():
     try:
 
         # 1. Validation
-        username, password = await user_input_validator(request)
+        body = await request.get_json()
+        validated_data = UserAuthRequest(**body)
+
+        
+        username = validated_data.username
+        password = validated_data.password
         logger.debug(f"Input for username '{username}' passed validation.")
         session: AsyncSession = g.session
         auth_repo = AuthRepository(session)
@@ -88,6 +111,17 @@ async def login():
         logger.info(f"User '{username}' logged in successfully.")
 
         response_dict, status_code = create_success_response(data={"token": token})
+        return jsonify(response_dict), status_code
+
+    except PydanticValidationError as e:
+        # Clean error handling for invalid input
+        logger.warning(f"Validation failed: {e.errors()}")
+        # We take the first error message to show the user
+        msg = e.errors()[0]["msg"]
+        field = e.errors()[0]["loc"][0]
+        response_dict, status_code = create_error_response(
+            f"Invalid {field}: {msg}", 400
+        )
         return jsonify(response_dict), status_code
 
     except Exception as e:

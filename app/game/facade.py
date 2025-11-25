@@ -1,3 +1,4 @@
+# import asyncio
 from typing import Dict, Any, Optional, Tuple, cast
 
 import chess
@@ -331,11 +332,14 @@ class GameFacade:
 
         # 1. Fetch Data (Repositories)
 
-        game = await self.game_repo.get_game_with_players(game_id)
+        game = await self.game_repo.get_game_with_players(game_id,for_update=True)
         if not game:
             raise GameNotFoundError(f"Game with ID {game_id} not found.")
 
         board, latest_move = await self._load_board_from_history(game_id)
+        
+        # logger.warning("--- SABOTAGE: Pausing to allow race condition ---")
+        # await asyncio.sleep(0.5)
 
         # 2. Create Context
         # Package all necessary data into our Context Object

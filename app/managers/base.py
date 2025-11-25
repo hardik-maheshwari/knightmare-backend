@@ -23,6 +23,12 @@ class BaseWebSocketManager:
         self._listening_task: asyncio.Task[None] | None = None
         self._active_subscriptions: Set[str] = set()
 
+        # This event acts as a traffic light.
+        # Green (Set) = We have subscribers, listen to Redis.
+        # Red (Cleared) = No subscribers, pause execution.
+        self._has_subscribers = asyncio.Event()
+        # --- FIX END ---
+
     async def startup(self):
         """Starts the background listener."""
         if not self._listening_task:
@@ -37,6 +43,13 @@ class BaseWebSocketManager:
             self._active_subscriptions.add(channel)
             logger.info(f"Subscribed provider to '{channel}'")
 
+        # --- FIX START: Wake up the listener ---
+        # If the traffic light was Red, turn it Green immediately.
+        if not self._has_subscribers.is_set():
+            self._has_subscribers.set()
+            logger.debug("Subscribers present. Resuming listener loop.")
+        # --- FIX END --
+
         logger.info(f"Connected client to '{channel}'")
 
     async def disconnect(self, channel: str, websocket: Websocket):
@@ -49,6 +62,13 @@ class BaseWebSocketManager:
                 await self.provider.unsubscribe(channel)
                 self._active_subscriptions.discard(channel)
                 logger.info(f"Unsubscribed provider from '{channel}'")
+
+        # --- FIX START: Pause the listener ---
+        # If no subscriptions are left in the entire system, turn the light Red.
+        if not self._active_subscriptions:
+            self._has_subscribers.clear()
+            logger.debug("No active subscriptions. Pausing listener loop.")
+        # --- FIX END ---
 
     async def broadcast_to_local(self, channel: str, message: str):
         sockets = self._local_connections.get(channel)
@@ -70,29 +90,32 @@ class BaseWebSocketManager:
         logger.info("Listener loop started.")
 
         while True:
+            logger.debug(f"In True loop")
             try:
-                
-                if self._active_subscriptions:
+                # --- FIX START: Event-based Waiting ---
+                # Instead of checking 'if subscriptions' and sleeping 5s,
+                # we WAIT. This blocks the task with 0 CPU usage until
+                # .set() is called in the connect() method.
+                await self._has_subscribers.wait()
+                # --- FIX END ---
+                logger.debug(f"Wait ended")
 
-                    # We have active games, so we listen.
-                    # This will block until a message arrives.
-                    async for msg in self.provider.listen():
+                # We have active games, so we listen.
+                # This will block until a message arrives.
+                async for msg in self.provider.listen():
 
-                        # Safety Check: If we lost all subs while listening, stop.
-                        if not self._active_subscriptions:
-                            break
+                    # Safety Check: If we lost all subs while listening (e.g. mass disconnect),
+                    # break the inner loop to go back to the .wait() state.
+                    if not self._active_subscriptions:
+                        break
 
-                        channel = msg["channel"]
-                        data = msg["data"]
-                        await self.broadcast_to_local(channel, data)
-
-                else:
-                    # 2. THE FIX: If no subscriptions, sleep to yield control.
-                    # This prevents the infinite CPU loop.
-                    await asyncio.sleep(5)
+                    channel = msg["channel"]
+                    data = msg["data"]
+                    await self.broadcast_to_local(channel, data)
 
             except Exception as e:
                 logger.error(f"Listener error: {e}. Retrying...", exc_info=True)
+                # We keep the sleep here only for error backoff (e.g. Redis down)
                 await asyncio.sleep(5)
                 await self._resubscribe_all()
 
