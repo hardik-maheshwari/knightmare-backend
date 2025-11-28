@@ -5,13 +5,9 @@ from quart import Blueprint, current_app, websocket
 from quart.wrappers import Websocket
 from app.auth.exceptions import InvalidCredentialsError, UserNotFoundError
 from app.auth.models import User
-from app.auth.repository import AuthRepository
-from app.auth.websocket_auth_facade import WebSocketAuthFacade
 from app.dependency_injection import get_container
-from app.extensions import AsyncSessionLocal, redis_client
+from app.extensions import AsyncSessionLocal
 from app.game.exceptions import GameNotFoundError
-from app.game.facade import GameFacade
-from app.game.repository import GameRepository
 from app.managers.game_manager import GameWebSocketManager
 from app.logger_setup import get_logger
 
