@@ -57,6 +57,10 @@ class Game(Base, TimestampMixin):
         default=chess.STARTING_FEN,
         server_default=chess.STARTING_FEN,
     )
+    
+    takeback_requester_id: Mapped[Optional[int]] = mapped_column(
+        BIGINT, ForeignKey("users.user_id", ondelete="SET NULL")
+    )
 
     def __repr__(self) -> str:
         return f"<Game game_id={self.game_id} status='{self.status.value}'>"

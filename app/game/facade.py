@@ -1,27 +1,24 @@
 # import asyncio
-from typing import Dict, Any, Optional, Tuple, cast
+from typing import Dict, Any, Optional
 
 import chess
 from app.auth.models import User
 from app.common.utils import generate_game_id
+from app.game.commands.request_takeback import RequestTakebackCommand
+from app.game.commands.respond_takeback import RespondTakebackCommand
+from app.game.commands.undo_move import UndoLastMoveCommand
 from app.game.exceptions import (
     AlreadyInGameError,
     GameNotFoundError,
     GameNotJoinableError,
+    UserNotPlayerError,
 )
-from app.game.models import Game, GameStatus, Move, PlayerColor
+from app.game.models import Game, GameStatus, PlayerColor
 from app.game.repository import GameRepository
 from app.auth.repository import AuthRepository
 from app.managers.game_manager import GameWebSocketManager
 from app.logger_setup import get_logger
-
-from app.game.rules.context import MoveContext
-from app.game.rules.handlers import (
-    GameActiveRule,
-    PlayerAuthRule,
-    TurnRule,
-    LegalMoveRule,
-)
+from app.game.commands.make_move import MakeMoveCommand
 
 logger = get_logger(__name__)
 
@@ -181,215 +178,88 @@ class GameFacade:
 
         return game
 
-    async def _load_board_from_history(
-        self, game_id: str
-    ) -> Tuple[chess.Board, Optional[Move]]:
-        """Loads the chess.Board object from the latest move in the DB."""
-        latest_move = await self.game_repo.get_latest_move(game_id)
-        current_fen = (
-            latest_move.board_fen_after_move if latest_move else chess.STARTING_FEN
-        )
-        logger.debug(f"Loading board with FEN: {current_fen}")
-        return chess.Board(current_fen), latest_move
-
-    def _get_captured_piece_symbol(
-        self, board: chess.Board, move: chess.Move
-    ) -> Optional[str]:
-        """Determines if a move is a capture and returns the captured piece's symbol."""
-        if board.is_capture(move):
-            if board.is_en_passant(move):
-                return "p" if board.turn == chess.WHITE else "P"
-
-            captured_piece = board.piece_at(move.to_square)
-            if captured_piece:
-                return captured_piece.symbol()
-        return None
-
-    def _update_game_status(self, game: Game, board: chess.Board) -> None:
-        """Checks for game-ending conditions and updates the game status."""
-        if board.is_checkmate():
-            game.status = (
-                GameStatus.WHITE_WIN
-                if board.turn == chess.BLACK
-                else GameStatus.BLACK_WIN
-            )
-            logger.info(
-                f"Checkmate detected. Game {game.game_id} status set to {game.status.value}"
-            )
-        elif (
-            board.is_stalemate()
-            or board.is_insufficient_material()
-            or board.is_seventyfive_moves()
-            or board.is_fivefold_repetition()
-        ):
-            game.status = GameStatus.DRAW
-            logger.info(
-                f"Draw detected. Game {game.game_id} status set to {game.status.value}"
-            )
-
-    def _create_new_move(
-        self,
-        game: Game,
-        board: chess.Board,
-        move_object: chess.Move,
-        latest_move: Optional[Move],
-        player: User,
-        captured_piece_symbol: Optional[str],
-    ) -> Move:
+    async def make_move(self, game_id: str, player: User, move_uci: str) -> chess.Move:
         """
-        Creates and returns a new Move domain object based on the game state.
-        This method does NOT save the object.
-        """
-        player_color = (
-            PlayerColor.WHITE
-            if player.user_id == game.white_player_id
-            else PlayerColor.BLACK
-        )
-
-        if latest_move is None:
-            new_move_number = 1
-        elif latest_move.player_color == PlayerColor.BLACK:
-            new_move_number = latest_move.move_number + 1
-        else:
-            new_move_number = latest_move.move_number
-
-        new_fen = board.fen()
-        # Data integrity check for a potential bug in the chess library's FEN generation on checkmate
-        if board.is_checkmate() and ("k" not in new_fen or "K" not in new_fen):
-            logger.warning(
-                f"Invalid FEN '{new_fen}' on checkmate. Reverting FEN to pre-move state."
-            )
-            # Temporarily undo the move to get the last valid FEN
-            board.pop()
-            new_fen = board.fen()
-            # Re-apply the move to keep the board state consistent for subsequent checks
-            board.push(move_object)
-
-        new_move = Move(
-            game_id=game.game_id,
-            move_number=new_move_number,
-            player_color=player_color,
-            move_notation=move_object.uci(),
-            board_fen_after_move=new_fen,
-            is_check=board.is_check(),
-            is_checkmate=board.is_checkmate(),
-            is_castling=board.is_castling(move_object),
-            captured_piece=captured_piece_symbol,
-        )
-
-        logger.debug(f"Created new unsaved Move object: {new_move.move_notation}")
-        return new_move
-
-    def _build_websocket_payload(self, game: Game, latest_move: Move) -> Dict[str, Any]:
-        """
-        Lightweight serializer for broadcasts.
-        O(1) Complexity. Uses game.current_fen and avoids fetching history.
-        """
-        # We use the stored FEN to create the board object instantly
-        board = chess.Board(game.current_fen)
-
-        white_player_data = None
-        if game.white_player:
-            white_player_data = {
-                "id": game.white_player.user_id,
-                "username": game.white_player.username,
-            }
-
-        black_player_data = None
-        if game.black_player:
-            black_player_data = {
-                "id": game.black_player.user_id,
-                "username": game.black_player.username,
-            }
-
-        return {
-            "type": "game_update",
-            "data": {
-                "game_id": game.game_id,
-                "white_player": white_player_data,
-                "black_player": black_player_data,
-                "status": game.status.value,
-                "current_fen": game.current_fen,  # Use the column!
-                "turn": "w" if board.turn == chess.WHITE else "b",
-                "is_check": board.is_check(),
-                "is_checkmate": board.is_checkmate(),
-                "is_draw": board.is_stalemate() or board.is_insufficient_material(),
-                # OPTIMIZATION: We only send the latest move, not the whole list.
-                # The frontend should append this to its local list.
-                "last_move": latest_move.move_notation,
-                "moves": [],  # We send empty list or remove it to signal "no history sent"
-            },
-        }
-
-    async def make_move(self, game_id: str, player: User, move_uci: str) -> Move:
-        """
-        Orchestrates the entire process of making a move using Chain of Responsibility
-        for validation.
+        Orchestrates the process of making a move by delegating to the MakeMoveCommand.
         """
         logger.debug(
-            f"--- make_move orchestrator started for game '{game_id}' by user '{player.username}' ---"
+            f"--- make_move (Command Pattern) started for game '{game_id}' by user '{player.username}' ---"
         )
 
         # 1. Fetch Data (Repositories)
+        # We still need to fetch the game here to pass it into the Command.
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
 
-        game = await self.game_repo.get_game_with_players(game_id,for_update=True)
         if not game:
             raise GameNotFoundError(f"Game with ID {game_id} not found.")
 
-        board, latest_move = await self._load_board_from_history(game_id)
-        
-        # logger.warning("--- SABOTAGE: Pausing to allow race condition ---")
-        # await asyncio.sleep(0.5)
-
-        # 2. Create Context
-        # Package all necessary data into our Context Object
-        move_context = MoveContext(
+        # 2. Instantiate the Command
+        command = MakeMoveCommand(
             game=game,
             player=player,
             move_uci=move_uci,
-            board=board,
-            latest_move_db=latest_move,
+            game_repo=self.game_repo,
+            ws_manager=self.ws_manager,
         )
 
-        # 3. Build & Execute Validation Chain
-        # We link the rules in specific order:
-        # Active? -> Authorized? -> Turn? -> Legal?
-        validation_chain = GameActiveRule()
-        validation_chain.set_next(PlayerAuthRule()).set_next(TurnRule()).set_next(
-            LegalMoveRule()
+        # 3. Execute the Command
+        # This runs validation, mutation, persistence, and broadcast.
+        move_result = await command.execute()
+
+        logger.info(
+            f"Command executed successfully. Move {move_result.move_id} created."
+        )
+        return move_result
+
+    async def undo_last_move(self, game_id: str, user: User) -> None:
+        """
+        Orchestrates a takeback.
+        """
+        logger.debug(
+            f"--- Requesting Undo for game '{game_id}' by '{user.username}' ---"
         )
 
-        # This will RAISE an exception if any rule fails.
-        # It will also ENRICH the context (ctx.parsed_move) if it succeeds.
-        validation_chain.check(move_context)
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
+        if not game:
+            raise GameNotFoundError(f"Game {game_id} not found")
 
-        # 4. Retrieve Enriched Data
-        # We trust LegalMoveRule to have populated this
-        move_object = cast(chess.Move, move_context.parsed_move)
+        # Authorization Rule:
+        # For Beta: Only allow if user is a player.
+        # (In real app, you'd check if opponent agreed, etc.)
+        if user.user_id not in (game.white_player_id, game.black_player_id):
+            # Or raise UserNotPlayerError
+            logger.warning("User tried to undo but is not a player.")
+            return
 
-        # 5. Execute Side Effects (State Mutation)
-        captured_piece_symbol = self._get_captured_piece_symbol(board, move_object)
+        command = UndoLastMoveCommand(game, self.game_repo, self.ws_manager)
+        await command.execute()
+        
+    async def request_takeback(self, game_id: str, user: User) -> None:
+        """
+        Orchestrates the request (handshake start).
+        """
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
+        if not game:
+            raise GameNotFoundError(f"Game {game_id} not found")
+        
+        # Validate user is a player
+        if user.user_id not in (game.white_player_id, game.black_player_id):
+             raise UserNotPlayerError("Only players can request takebacks.")
 
-        board.push(move_object)  # Update board state
-        self._update_game_status(game, board)  # Check for checkmate/draw
-        game.current_fen = board.fen()
+        command = RequestTakebackCommand(game, user, self.game_repo, self.ws_manager)
+        await command.execute()
 
-        # 6. Persist
-        new_move = self._create_new_move(
-            game=game,
-            board=board,
-            move_object=move_object,
-            latest_move=latest_move,
-            player=player,
-            captured_piece_symbol=captured_piece_symbol,
-        )
 
-        await self.game_repo.save_move(new_move)
+    async def respond_takeback(self, game_id: str, user: User, is_accepted: bool) -> None:
+        """
+        Orchestrates the response (handshake end).
+        """
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
+        if not game:
+            raise GameNotFoundError(f"Game {game_id} not found")
+            
+        if user.user_id not in (game.white_player_id, game.black_player_id):
+             raise UserNotPlayerError("Only players can respond to takebacks.")
 
-        # 7. Broadcast
-        ws_payload = self._build_websocket_payload(game, new_move)
-
-        await self.ws_manager.publish_event(game_id, ws_payload)
-
-        logger.info(f"Move '{move_uci}' successfully processed for game '{game_id}'.")
-        return new_move
+        command = RespondTakebackCommand(game, user, is_accepted, self.game_repo, self.ws_manager)
+        await command.execute()

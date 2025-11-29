@@ -115,3 +115,11 @@ class GameRepository:
         )
         result = await self.session.execute(statement)
         return result.scalars().first()
+
+    async def delete_move(self, move: Move) -> None:
+        """
+        Hard deletes a move record from the database.
+        """
+        logger.debug(f"Deleting move {move.move_id} ({move.move_notation}) from DB.")
+        await self.session.delete(move)
+        await self.session.flush()

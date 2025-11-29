@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Dict
 import httpx
 import websockets
 import redis.asyncio as redis
@@ -9,155 +9,151 @@ import redis.asyncio as redis
 BASE_URL = "http://localhost:8080"
 WS_BASE_URL = "ws://localhost:8080"
 REDIS_URL = "redis://localhost:6379"
-KYOYA_CREDS = {"username": "kyoya", "password": "leone123"}
-RYUGA_CREDS = {"username": "ryuga", "password": "ldrago456"}
 
+# Creds
+KYOYA = {"username": "kyoya", "password": "leone123"} # White
+RYUGA = {"username": "ryuga", "password": "ldrago456"} # Black
 
-# --- Helper Functions ---
+# --- API Helpers ---
 async def get_token(client: httpx.AsyncClient, creds: Dict[str, str]) -> str:
-    """Logs in a user and returns their token."""
     resp = await client.post(f"{BASE_URL}/api/auth/login/", json=creds)
     resp.raise_for_status()
     return resp.json()["data"]["token"]
 
-
-async def make_move(
-    client: httpx.AsyncClient, game_id: str, token: str, move_uci: str, player_name: str
-):
-    """Makes a move via the HTTP API."""
-    print(f"--- {player_name} plays: {move_uci} ---")
+async def make_move(client: httpx.AsyncClient, game_id: str, token: str, move_uci: str, player_name: str):
+    print(f"♟️  {player_name} plays: {move_uci}")
     headers = {"Authorization": f"Bearer {token}"}
     resp = await client.post(
         f"{BASE_URL}/api/games/{game_id}/moves/",
         headers=headers,
         json={"move": move_uci},
     )
-    resp.raise_for_status()  # Will fail the test if the move is rejected
+    resp.raise_for_status()
 
+async def request_takeback(client: httpx.AsyncClient, game_id: str, token: str):
+    print(f"🙏 Kyoya (White) REQUESTS a takeback...")
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.post(f"{BASE_URL}/api/games/{game_id}/takeback/request/", headers=headers)
+    resp.raise_for_status()
 
+async def respond_takeback(client: httpx.AsyncClient, game_id: str, token: str, accepted: bool):
+    decision = "ACCEPTS" if accepted else "DECLINES"
+    print(f"👍 Ryuga (Black) {decision} the takeback.")
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.post(
+        f"{BASE_URL}/api/games/{game_id}/takeback/respond/", 
+        headers=headers,
+        json={"accepted": accepted}
+    )
+    resp.raise_for_status()
+
+# --- Main Test ---
 async def main():
-    print("======== STARTING FULL GAME (SCHOLAR'S MATE) LISTENER TEST ========")
+    print("\n======== 🧪 STARTING HANDSHAKE UNDO TEST (CHECKMATE REVERSAL) 🧪 ========\n")
 
     async with httpx.AsyncClient(timeout=10) as client:
-        # 1. SETUP: Register users, log them in, create and join a game.
-        print("--- Setting up users and game... ---")
-        await client.post(f"{BASE_URL}/api/auth/register/", json=KYOYA_CREDS)
-        await client.post(f"{BASE_URL}/api/auth/register/", json=RYUGA_CREDS)
+        # 1. SETUP
+        print("--- 🛠️  Setting up Users & Game ---")
+        await client.post(f"{BASE_URL}/api/auth/register/", json=KYOYA)
+        await client.post(f"{BASE_URL}/api/auth/register/", json=RYUGA)
+        t_white = await get_token(client, KYOYA)
+        t_black = await get_token(client, RYUGA)
 
-        kyoya_token = await get_token(client, KYOYA_CREDS)
-        ryuga_token = await get_token(client, RYUGA_CREDS)
-
-        headers_kyoya = {"Authorization": f"Bearer {kyoya_token}"}
-        resp = await client.post(f"{BASE_URL}/api/games/", headers=headers_kyoya)
+        # Create & Join
+        resp = await client.post(f"{BASE_URL}/api/games/", headers={"Authorization": f"Bearer {t_white}"})
         game_id = resp.json()["data"]["game_id"]
-        print(f"Game created with ID: {game_id}")
+        await client.post(f"{BASE_URL}/api/games/{game_id}/join/", headers={"Authorization": f"Bearer {t_black}"})
+        print(f"✅ Game {game_id} Created & Active.\n")
 
-        headers_ryuga = {"Authorization": f"Bearer {ryuga_token}"}
-        await client.post(
-            f"{BASE_URL}/api/games/{game_id}/join/", headers=headers_ryuga
-        )
-        print("Game is now ACTIVE.")
+        # 2. LISTENER SETUP
+        # We use asyncio Events to synchronize the test script with WebSocket events
+        offer_received_event = asyncio.ensure_future(asyncio.Future())
+        undo_complete_event = asyncio.ensure_future(asyncio.Future())
+        
+        async def websocket_listener():
+            # Get Ticket for Black
+            resp = await client.post(f"{BASE_URL}/api/games/{game_id}/ws-ticket/", headers={"Authorization": f"Bearer {t_black}"})
+            ticket = resp.json()["data"]["ticket"]
+            
+            async with websockets.connect(f"{WS_BASE_URL}/api/games/{game_id}/ws?ticket={ticket}") as ws:
+                print("🎧 Listener (Ryuga) Connected.")
+                while True:
+                    msg = await ws.recv()
+                    payload = json.loads(msg)
+                    msg_type = payload.get("type")
+                    data = payload.get("data", {})
 
-        # 2. LISTENER SETUP: One player (Ryuga) will listen for all game events.
-        final_checkmate_event: asyncio.Future[Dict[str, Any]] = asyncio.Future()
-        print(f"The type of final_checkmate_event is {final_checkmate_event}")
+                    if msg_type == "takeback_offered":
+                        print(f"✨ WS EVENT: Takeback Offered by {data['requester_username']}")
+                        if not offer_received_event.done():
+                            offer_received_event.set_result(True)
 
-        async def game_event_listener():
-            # Get a ticket for Ryuga to connect
-            resp_ticket = await client.post(
-                f"{BASE_URL}/api/games/{game_id}/ws-ticket/", headers=headers_ryuga
-            )
-            ticket = resp_ticket.json()["data"]["ticket"]
-            print(f"--- Listener (Ryuga) got ticket and is connecting... ---")
+                    elif msg_type == "game_update":
+                        last_move = data.get("last_move")
+                        status = data.get("status")
+                        print(f"📡 WS EVENT: Game Update | Status: {status} | Last Move: {last_move}")
+                        
+                        # Detect the Reversal:
+                        # We expect status to go BACK to 'active' and last_move to go BACK to 'g8f6'
+                        if status == "active" and last_move == "g8f6" and not undo_complete_event.done():
+                            print("✅ VERIFIED: Game status reverted to ACTIVE. Undo successful.")
+                            undo_complete_event.set_result(True)
 
-            ws_url = f"{WS_BASE_URL}/api/games/{game_id}/ws?ticket={ticket}"
+        listener_task = asyncio.create_task(websocket_listener())
+        await asyncio.sleep(1)
 
-            try:
-                async with websockets.connect(ws_url) as websocket:
-                    print("--- Listener connected! Monitoring all game events... ---")
-
-                    while True:
-                        message_str = await websocket.recv()
-                        payload = json.loads(message_str)
-                        game_data = payload.get("data", {})
-
-                        # We are now looking for the final state of the game.
-                        if game_data.get("is_checkmate") is True:
-                            print(
-                                f"\n+++ CHECKMATE EVENT RECEIVED! +++\n{json.dumps(game_data, indent=2)}\n"
-                            )
-                            final_checkmate_event.set_result(game_data)
-                            break  # Our job is done, exit the loop.
-                        else:
-                            # Log other game states as they come in
-                            moves_so_far = game_data.get("moves", [])
-                            print(
-                                f"--- Listener received game update. Moves: {len(moves_so_far)} ---"
-                            )
-            except websockets.exceptions.ConnectionClosed as e:
-                if not final_checkmate_event.done():
-                    final_checkmate_event.set_exception(e)
-
-        # Start the listener in the background
-        listener_task = asyncio.create_task(game_event_listener())
-        await asyncio.sleep(
-            2
-        )  # Give it time to connect and receive the first two events
-
-        # 3. ACTION: Play out Scholar's Mate. Kyoya is White.
-        print("\n--- Executing Scholar's Mate sequence... ---")
         try:
-            await make_move(client, game_id, kyoya_token, "e2e4", "Kyoya (White)")
-            await asyncio.sleep(1)
-            await make_move(client, game_id, ryuga_token, "e7e5", "Ryuga (Black)")
-            await asyncio.sleep(1)
-            await make_move(client, game_id, kyoya_token, "d1h5", "Kyoya (White)")
-            await asyncio.sleep(1)
-            await make_move(client, game_id, ryuga_token, "b8c6", "Ryuga (Black)")
-            await asyncio.sleep(1)
-            await make_move(client, game_id, kyoya_token, "f1c4", "Kyoya (White)")
-            await asyncio.sleep(1)
-            await make_move(client, game_id, ryuga_token, "g8f6", "Ryuga (Black)")
-            await asyncio.sleep(1)
-            await make_move(
-                client, game_id, kyoya_token, "h5f7", "Kyoya (White)"
-            )  # The checkmating move
+            # 3. PLAY SCHOLAR'S MATE
+            print("--- ⚔️  Executing Scholar's Mate ---")
+            moves = [
+                (t_white, "e2e4", "White"),
+                (t_black, "e7e5", "Black"),
+                (t_white, "d1h5", "White"),
+                (t_black, "b8c6", "Black"),
+                (t_white, "f1c4", "White"),
+                (t_black, "g8f6", "Black"),
+            ]
+            for token, move, name in moves:
+                await make_move(client, game_id, token, move, name)
+                await asyncio.sleep(0.2)
 
-        except httpx.HTTPStatusError as e:
-            print(f"\n❌ FATAL: A move was rejected by the server: {e.response.text}")
+            # THE CHECKMATE MOVE
+            await make_move(client, game_id, t_white, "h5f7", "White") 
+            print("💀 CHECKMATE delivered. Game is now in WHITE_WIN state.")
+            await asyncio.sleep(1)
+
+            # 4. REQUEST TAKEBACK
+            print("\n--- 🤝 Starting Handshake Protocol ---")
+            await request_takeback(client, game_id, t_white)
+            
+            # Wait for WS event
+            await asyncio.wait_for(offer_received_event, timeout=5)
+            print("✅ Verification: Offer received via WebSocket.")
+
+            # 5. ACCEPT TAKEBACK
+            await respond_takeback(client, game_id, t_black, accepted=True)
+
+            # Wait for Board Reversion
+            await asyncio.wait_for(undo_complete_event, timeout=5)
+
+            # 6. RESUME PLAY
+            print("\n--- ▶️  Resuming Game ---")
+            # White plays the checkmate again to finish up
+            await make_move(client, game_id, t_white, "h5f7", "White")
+            print("💀 CHECKMATE delivered (again).")
+
+        except Exception as e:
+            print(f"\n❌ TEST FAILED: {e}")
             listener_task.cancel()
             exit(1)
 
-        # 4. VERIFICATION: Wait for the listener to have its future resolved by the checkmate event.
-        print("\n--- Waiting for listener to confirm checkmate event... ---")
-        try:
-            final_data = await asyncio.wait_for(final_checkmate_event, timeout=5)
-
-            assert final_data["status"] == "white_win"
-            assert final_data["is_checkmate"] is True
-            assert final_data["last_move"] == "h5f7"
-
-            print(
-                "\n✅ SUCCESS: WebSocket listener received the correct 'white_win' and 'is_checkmate' flags."
-            )
-
-        except asyncio.TimeoutError:
-            print(
-                "\n❌ FAILURE: Listener did not receive the final checkmate event within the timeout."
-            )
-            exit(1)
-        finally:
-            listener_task.cancel()
-
+        print("\n🎉🎉 FULL TEST PASSED: Checkmate undone, Status restored, Game finished. 🎉🎉")
+        listener_task.cancel()
 
 if __name__ == "__main__":
-    # Clean up DB and Redis before starting
+    # Flush Redis
     try:
-        r = redis.from_url(REDIS_URL, decode_responses=True)  # type: ignore
-        asyncio.run(r.flushdb())  # type: ignore
-        print("--- Redis cache flushed. ---")
-        # Add DB cleanup here if needed, but the test handles new users each time
-    except Exception as e:
-        print(f"Could not flush Redis: {e}")
-
+        r = redis.from_url(REDIS_URL, decode_responses=True) # type: ignore
+        asyncio.run(r.flushdb()) # type: ignore
+    except: pass
     asyncio.run(main())

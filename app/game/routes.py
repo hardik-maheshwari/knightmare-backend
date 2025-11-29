@@ -9,6 +9,7 @@ from app.common.response_utils import create_success_response, create_error_resp
 from app.common.schemas import MoveRequest
 from app.extensions import redis_client
 from pydantic import ValidationError as PydanticValidationError
+from app.common.schemas import TakebackResponseRequest
 
 # from app.game.models import Game
 from app.dependency_injection import get_container
@@ -201,4 +202,92 @@ async def make_move_route(game_id: str, current_user: User):
             f"Unexpected error making move in game {game_id}: {e}", exc_info=True
         )
         response, status = create_error_response("Internal Server Error", 500)
+        return jsonify(response), status
+
+
+@game_bp.route("/<string:game_id>/undo/", methods=["POST"])
+@token_required
+async def undo_move_route(game_id: str, current_user: User):
+    """
+    Beta Feature: Request a takeback (Undo last move).
+    """
+    try:
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.undo_last_move(game_id, current_user)
+
+        response, status = create_success_response(
+            data={"message": "Undo successful"}, status_code=200
+        )
+        return jsonify(response), status
+
+    except Exception as e:
+        logger.error(f"Error undoing move: {e}", exc_info=True)
+        response, status = create_error_response(str(e), 500)
+        return jsonify(response), status
+
+
+@game_bp.route("/<string:game_id>/takeback/request/", methods=["POST"])
+@token_required
+async def request_takeback_route(game_id: str, current_user: User):
+    """
+    Initiates a takeback request.
+    """
+    try:
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.request_takeback(game_id, current_user)
+
+        response, status = create_success_response(
+            data={"message": "Takeback requested successfully"}, status_code=200
+        )
+        return jsonify(response), status
+
+    except Exception as e:
+        logger.error(f"Error requesting takeback: {e}", exc_info=True)
+        # Map GameErrors to appropriate status codes if needed
+        response, status = create_error_response(str(e), 500)
+        return jsonify(response), status
+
+
+@game_bp.route("/<string:game_id>/takeback/respond/", methods=["POST"])
+@token_required
+async def respond_takeback_route(game_id: str, current_user: User):
+    """
+    Accepts or declines a takeback request.
+    Payload: {"accepted": true}
+    """
+    try:
+        body = await request.get_json()
+
+        validated_data = TakebackResponseRequest(**body)
+        is_accepted = validated_data.accepted
+        if is_accepted is None:  # type: ignore
+            
+            return (
+                jsonify(
+                    create_error_response("Missing 'accepted' boolean field", 500)[0]
+                ),
+                500,
+            )
+
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.respond_takeback(game_id, current_user, bool(is_accepted))
+
+        action = "accepted" if is_accepted else "declined"
+        response, status = create_success_response(
+            data={"message": f"Takeback {action}"}, status_code=200
+        )
+        return jsonify(response), status
+
+    except Exception as e:
+        logger.error(f"Error responding to takeback: {e}", exc_info=True)
+        response, status = create_error_response(str(e), 500)
         return jsonify(response), status

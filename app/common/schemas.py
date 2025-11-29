@@ -42,3 +42,6 @@ class MoveRequest(BaseModel):
         pattern=r"^[a-h][1-8][a-h][1-8][qrbn]?$",
         description="UCI format move string (source+target+promotion)",
     )
+
+class TakebackResponseRequest(BaseModel):
+    accepted: bool
