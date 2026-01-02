@@ -1,10 +1,14 @@
 import asyncio
+import os
 from dotenv import load_dotenv
-load_dotenv()
+
+APP_ENV = os.getenv("APP_ENV")
+
+if APP_ENV in ("local", "cloud"):
+    load_dotenv(f".env.{APP_ENV}")
 
 print("--- .env file loaded ---")
 
-import os
 import sys
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -45,9 +49,9 @@ logger.info("target_metadata assigned from Base.metadata.")
 # --- Migration Functions ---
 
 
-def do_run_migrations(connection): # type: ignore
+def do_run_migrations(connection):  # type: ignore
     logger.info("do_run_migrations: Configuring context with connection.")
-    context.configure(connection=connection, target_metadata=target_metadata) # type: ignore
+    context.configure(connection=connection, target_metadata=target_metadata)  # type: ignore
     logger.info("do_run_migrations: Beginning transaction and running migrations.")
     with context.begin_transaction():
         context.run_migrations()
@@ -100,7 +104,7 @@ async def run_async_migrations():
     logger.info("Step 4: Connecting to the database...")
     async with connectable.connect() as connection:
         logger.info("Step 4: Connection SUCCEEDED.")
-        await connection.run_sync(do_run_migrations) # type: ignore
+        await connection.run_sync(do_run_migrations)  # type: ignore
 
     logger.info("Step 5: Disposing of the engine.")
     await connectable.dispose()

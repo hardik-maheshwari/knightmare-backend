@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env
+
+# Git
+.git/
+.gitignore
+
+# Editor / IDE
+.vscode/
+
+# Logs & local artifacts
+*.log
+cry.log
+
+# Tests / experiments (not runtime)
+test_*.py
+lag_test.py
+race_condition.py
+backend_tour.txt
+
+# Docker
+Dockerfile
+
+# OS junk
+.DS_Store

@@ -1,7 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+APP_ENV = os.getenv("APP_ENV")
+
+if APP_ENV in ("local", "cloud"):
+    load_dotenv(f".env.{APP_ENV}")
 
 
 def get_required_env(var_name: str) -> str:

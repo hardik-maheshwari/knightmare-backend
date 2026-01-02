@@ -84,3 +84,5 @@ def create_app():
     logger.info("--- Application creation complete. ---")
     # app = cors(app, allow_origin="*")
     return app
+
+app = create_app()
