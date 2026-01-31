@@ -1,11 +1,8 @@
 import asyncio
 import os
 from dotenv import load_dotenv
-
-APP_ENV = os.getenv("APP_ENV")
-
-if APP_ENV in ("local", "cloud"):
-    load_dotenv(f".env.{APP_ENV}")
+import config as app_config
+load_dotenv()
 
 print("--- .env file loaded ---")
 
@@ -60,10 +57,10 @@ def do_run_migrations(connection):  # type: ignore
 
 def run_migrations_offline() -> None:
     logger.warning("Running in OFFLINE mode.")
-    url = os.getenv("DATABASE_URL")  # Get URL directly for offline mode too
+    url = app_config.DATABASE_URL  # type: ignore # Get URL directly for offline mode too
     logger.info(f"Offline mode URL from os.getenv: {url}")
     context.configure(
-        url=url,
+        url=url, # type: ignore
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -75,7 +72,7 @@ def run_migrations_offline() -> None:
 async def run_async_migrations():
     logger.info("run_async_migrations: Starting.")
 
-    db_url = os.getenv("DATABASE_URL")
+    db_url = app_config.DATABASE_URL # type: ignore
     logger.info(f"Step 1: Read DATABASE_URL from environment: '{db_url}'")
 
     if not db_url:
@@ -84,13 +81,13 @@ async def run_async_migrations():
         )
         raise ValueError("DATABASE_URL environment variable is not set or is empty.")
 
-    config_options = {"url": db_url}
+    config_options = {"url": db_url} # type: ignore
     logger.info(f"Step 2: Created config dictionary for engine: {config_options}")
 
     try:
         logger.info("Step 3: Calling async_engine_from_config...")
         connectable = async_engine_from_config(
-            config_options,
+            config_options, # type: ignore
             prefix="",  # We are not using a prefix like 'sqlalchemy.'
             poolclass=pool.NullPool,
         )

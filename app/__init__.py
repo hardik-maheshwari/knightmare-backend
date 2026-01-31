@@ -6,6 +6,7 @@ from .extensions import AsyncSessionLocal, rate_limiter
 from app.extensions import redis_client
 from app.managers.game_manager import GameWebSocketManager
 from app.pubsub.providers.redis_pubsub_provider import RedisPubSubProvider
+from app.pubsub.providers.in_memory_provider import InMemoryPubSubProvider 
 from app.logger_setup import get_logger
 from quart_cors import cors  # type: ignore
 
@@ -68,7 +69,13 @@ def create_app():
     logger.debug("Custom error handler for RateLimitExceeded has been registered.")
 
     logger.info("Attaching ws manager")
-    pubsub_provider = RedisPubSubProvider(redis_client)
+    if config.USE_REDIS:
+        logger.info("Using REDIS PubSub Provider")
+        # redis_client comes from app.extensions (Real Redis)
+        pubsub_provider = RedisPubSubProvider(redis_client) # type: ignore
+    else:
+        logger.info("Using IN-MEMORY PubSub Provider")
+        pubsub_provider = InMemoryPubSubProvider()
 
     app.ws_manager = GameWebSocketManager(pubsub_provider)  # type: ignore
 
@@ -85,4 +92,6 @@ def create_app():
     # app = cors(app, allow_origin="*")
     return app
 
-app = create_app()
+if __name__ == "__main__":
+    app = create_app()
+    app.run()
