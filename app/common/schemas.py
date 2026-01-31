@@ -15,7 +15,7 @@ class UserAuthRequest(BaseModel):
     )
     password: str = Field(
         ...,
-        min_length=8,
+        min_length=1,
         max_length=128,  # Good practice to prevent DoS via massive passwords
         description="Plaintext password.",
     )

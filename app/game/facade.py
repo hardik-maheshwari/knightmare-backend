@@ -1,11 +1,12 @@
 # import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 import chess
 from app.auth.models import User
 from app.common.utils import generate_game_id
 from app.game.commands.request_takeback import RequestTakebackCommand
 from app.game.commands.respond_takeback import RespondTakebackCommand
+from app.game.commands.send_chat import SendChatCommand
 from app.game.commands.undo_move import UndoLastMoveCommand
 from app.game.exceptions import (
     AlreadyInGameError,
@@ -111,6 +112,18 @@ class GameFacade:
                 "username": game.black_player.username,
             }
 
+        chat_history_objs = await self.game_repo.get_chat_history(game_id)
+        logger.debug(f"This is {chat_history_objs}")
+        chat_history: List[Dict[str, Any]] = [
+            {
+                "message_id": msg.message_id,
+                "sender_username": msg.sender.username,
+                "content": msg.content,
+                "timestamp": msg.created_at.isoformat(),
+            }
+            for msg in chat_history_objs
+        ]
+
         # 5. Assemble the final, clean payload.
         payload: Dict[str, Any] = {
             "type": "game_update",
@@ -130,6 +143,7 @@ class GameFacade:
                 or board.is_seventyfive_moves()
                 or board.is_fivefold_repetition(),
                 "moves": [move.move_notation for move in moves],
+                "chat_history": chat_history,
             },
         }
 
@@ -233,7 +247,7 @@ class GameFacade:
 
         command = UndoLastMoveCommand(game, self.game_repo, self.ws_manager)
         await command.execute()
-        
+
     async def request_takeback(self, game_id: str, user: User) -> None:
         """
         Orchestrates the request (handshake start).
@@ -241,25 +255,52 @@ class GameFacade:
         game = await self.game_repo.get_game_with_players(game_id, for_update=True)
         if not game:
             raise GameNotFoundError(f"Game {game_id} not found")
-        
+
         # Validate user is a player
         if user.user_id not in (game.white_player_id, game.black_player_id):
-             raise UserNotPlayerError("Only players can request takebacks.")
+            raise UserNotPlayerError("Only players can request takebacks.")
 
         command = RequestTakebackCommand(game, user, self.game_repo, self.ws_manager)
         await command.execute()
 
-
-    async def respond_takeback(self, game_id: str, user: User, is_accepted: bool) -> None:
+    async def respond_takeback(
+        self, game_id: str, user: User, is_accepted: bool
+    ) -> None:
         """
         Orchestrates the response (handshake end).
         """
         game = await self.game_repo.get_game_with_players(game_id, for_update=True)
         if not game:
             raise GameNotFoundError(f"Game {game_id} not found")
-            
-        if user.user_id not in (game.white_player_id, game.black_player_id):
-             raise UserNotPlayerError("Only players can respond to takebacks.")
 
-        command = RespondTakebackCommand(game, user, is_accepted, self.game_repo, self.ws_manager)
+        if user.user_id not in (game.white_player_id, game.black_player_id):
+            raise UserNotPlayerError("Only players can respond to takebacks.")
+
+        command = RespondTakebackCommand(
+            game, user, is_accepted, self.game_repo, self.ws_manager
+        )
+        await command.execute()
+
+    async def broadcast_signal(
+        self, game_id: str, sender: User, signal_type: str, payload: Any
+    ) -> None:
+        """
+        Pass-through method for WebRTC signaling (PeerIDs, Ice Candidates).
+        Does not persist to DB.
+        """
+        message: Dict[str, Any] = {
+            "type": "signal_update",
+            "data": {
+                "sender_id": sender.user_id,
+                "sender_username": sender.username,
+                "signal_type": signal_type,
+                "payload": payload,
+            },
+        }
+        await self.ws_manager.publish_event(game_id, message)
+
+    async def send_chat_message(self, game_id: str, sender: User, content: str) -> None:
+        command = SendChatCommand(
+            game_id, sender, content, self.game_repo, self.ws_manager
+        )
         await command.execute()

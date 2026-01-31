@@ -146,7 +146,7 @@ async def get_game_history(game_id: str, current_user: User):
         container = get_container(session)
         facade = container.get_game_facade()
 
-        game_details = await facade.get_game_details(game_id, current_user)  # type: ignore
+        game_details = await facade.get_serialized_game_state(game_id)
 
         response, status = create_success_response(data=game_details, status_code=200)
         return jsonify(response), status
@@ -267,7 +267,7 @@ async def respond_takeback_route(game_id: str, current_user: User):
         validated_data = TakebackResponseRequest(**body)
         is_accepted = validated_data.accepted
         if is_accepted is None:  # type: ignore
-            
+
             return (
                 jsonify(
                     create_error_response("Missing 'accepted' boolean field", 500)[0]
@@ -291,3 +291,54 @@ async def respond_takeback_route(game_id: str, current_user: User):
         logger.error(f"Error responding to takeback: {e}", exc_info=True)
         response, status = create_error_response(str(e), 500)
         return jsonify(response), status
+
+
+@game_bp.route("/<string:game_id>/signal/", methods=["POST"])
+@token_required
+async def signal_route(game_id: str, current_user: User):
+    """
+    Route for exchanging ephemeral signals (Video IDs, Chat messages).
+    """
+    try:
+        body = await request.get_json()
+        signal_type = body.get("type")
+        payload = body.get("payload")
+
+        if not signal_type or not payload:
+            return jsonify({"error": "Missing type or payload"}), 400
+
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.broadcast_signal(game_id, current_user, signal_type, payload)
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        logger.error(f"Signal error: {e}", exc_info=True)
+        response, status = create_error_response("Internal Server Error", 500)
+        return jsonify(response), status
+
+
+@game_bp.route("/<string:game_id>/chat/", methods=["POST"])
+@token_required
+async def send_chat_route(game_id: str, current_user: User):
+    try:
+        body = await request.get_json()
+        content = body.get("content")
+
+        if not content or not isinstance(content, str) or not content.strip():
+            return jsonify({"error": "Message cannot be empty"}), 400
+
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.send_chat_message(game_id, current_user, content)
+
+        return jsonify({"status": "sent"}), 201
+
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        return jsonify({"error": "Internal Server Error"}), 500

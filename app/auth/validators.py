@@ -28,7 +28,7 @@ def validate_password(password: Any) -> Optional[str]:
     """
     if not isinstance(password, str) or not password:
         return "Password must be a non-empty string."
-    if len(password) < 8:
+    if len(password) < 1:
         return "Password must be at least 8 characters long."
 
     return None

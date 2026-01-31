@@ -1,5 +1,5 @@
 from typing import List, Optional
-from .models import Game, Move
+from .models import ChatMessage, Game, Move
 from app.logger_setup import get_logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -123,3 +123,21 @@ class GameRepository:
         logger.debug(f"Deleting move {move.move_id} ({move.move_notation}) from DB.")
         await self.session.delete(move)
         await self.session.flush()
+
+    async def save_chat_message(self, message: ChatMessage) -> ChatMessage:
+        self.session.add(message)
+        await self.session.flush()
+        # Eager load sender so we can broadcast username immediately
+        await self.session.refresh(message, attribute_names=["sender"])
+        return message
+
+    async def get_chat_history(self, game_id: str) -> List[ChatMessage]:
+        logger.debug(f"Querying chat history for game {game_id}")
+        statement = (
+            select(ChatMessage)
+            .where(ChatMessage.game_id == game_id)
+            .order_by(ChatMessage.created_at.asc())
+            .options(joinedload(ChatMessage.sender))
+        )
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())

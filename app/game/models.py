@@ -1,5 +1,5 @@
 from typing import Optional
-from sqlalchemy import BIGINT, ForeignKey, Enum, VARCHAR
+from sqlalchemy import BIGINT, ForeignKey, Enum, VARCHAR, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..extensions import Base
 from app.common.types import (
@@ -86,3 +86,23 @@ class Move(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<Move move_id={self.move_id} game_id='{self.game_id}' move='{self.move_notation}'>"
+
+
+
+class ChatMessage(Base, TimestampMixin):
+    __tablename__ = "chat_messages"
+
+    message_id: Mapped[int_pk]
+    game_id: Mapped[str] = mapped_column(
+        VARCHAR(10), ForeignKey("games.game_id", ondelete="CASCADE"), nullable=False
+    )
+    sender_id: Mapped[int] = mapped_column(
+        BIGINT, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # Relationship to user to get username easily
+    sender = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<ChatMessage id={self.message_id} game='{self.game_id}'>"
