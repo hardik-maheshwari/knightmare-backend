@@ -1,5 +1,5 @@
 import config
-from quart import Quart, g
+from quart import Quart, g,request
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import register_error_handlers
 from .extensions import AsyncSessionLocal, rate_limiter
@@ -27,6 +27,8 @@ def create_app():
 
     @app.before_request
     async def open_db_session():
+        if request.path == "/health":
+            return
         g.session = AsyncSessionLocal()
         logger.info("DB session opened")
 

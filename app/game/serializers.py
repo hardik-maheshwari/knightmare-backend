@@ -43,6 +43,11 @@ def build_websocket_payload(game: Game, latest_move: Move) -> Dict[str, Any]:
             # The frontend should append this to its local list.
             "last_move": latest_move.move_notation,
             "moves": [],  # We send empty list or remove it to signal "no history sent"
+            "white_time_ms": game.white_time_ms,
+            "black_time_ms": game.black_time_ms,
+            "last_move_at": (
+                game.last_move_at.isoformat() if game.last_move_at else None
+            ),
         },
     }
 
@@ -62,10 +67,4 @@ def build_takeback_response_payload(game_id: str, status: str) -> Dict[str, Any]
     """
     Status should be 'accepted' or 'declined'.
     """
-    return {
-        "type": "takeback_response",
-        "data": {
-            "game_id": game_id,
-            "status": status
-        }
-    }
+    return {"type": "takeback_response", "data": {"game_id": game_id, "status": status}}

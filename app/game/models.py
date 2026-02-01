@@ -1,5 +1,6 @@
+from datetime import datetime
 from typing import Optional
-from sqlalchemy import BIGINT, ForeignKey, Enum, VARCHAR, Text
+from sqlalchemy import BIGINT, TIMESTAMP, ForeignKey, Enum, VARCHAR, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..extensions import Base
 from app.common.types import (
@@ -57,9 +58,17 @@ class Game(Base, TimestampMixin):
         default=chess.STARTING_FEN,
         server_default=chess.STARTING_FEN,
     )
-    
+
     takeback_requester_id: Mapped[Optional[int]] = mapped_column(
         BIGINT, ForeignKey("users.user_id", ondelete="SET NULL")
+    )
+
+    white_time_ms: Mapped[Optional[int]] = mapped_column(BIGINT, nullable=True)
+    black_time_ms: Mapped[Optional[int]] = mapped_column(BIGINT, nullable=True)
+
+    # The Anchor. Using TIMESTAMP(timezone=True) is crucial.
+    last_move_at: Mapped[Optional[datetime]] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
     )
 
     def __repr__(self) -> str:
@@ -88,7 +97,6 @@ class Move(Base, TimestampMixin):
         return f"<Move move_id={self.move_id} game_id='{self.game_id}' move='{self.move_notation}'>"
 
 
-
 class ChatMessage(Base, TimestampMixin):
     __tablename__ = "chat_messages"
 
@@ -100,7 +108,7 @@ class ChatMessage(Base, TimestampMixin):
         BIGINT, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    
+
     # Relationship to user to get username easily
     sender = relationship("User")
 

@@ -1,10 +1,13 @@
 # import asyncio
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 import chess
 from app.auth.models import User
 from app.common.utils import generate_game_id
+from app.game.commands.claim_timeout import ClaimTimeoutCommand
 from app.game.commands.request_takeback import RequestTakebackCommand
+from app.game.commands.resign_game import ResignGameCommand
 from app.game.commands.respond_takeback import RespondTakebackCommand
 from app.game.commands.send_chat import SendChatCommand
 from app.game.commands.undo_move import UndoLastMoveCommand
@@ -113,7 +116,6 @@ class GameFacade:
             }
 
         chat_history_objs = await self.game_repo.get_chat_history(game_id)
-        logger.debug(f"This is {chat_history_objs}")
         chat_history: List[Dict[str, Any]] = [
             {
                 "message_id": msg.message_id,
@@ -129,10 +131,8 @@ class GameFacade:
             "type": "game_update",
             "data": {
                 "game_id": game_id,
-                # --- FIX: Directly use the prepared data dictionaries ---
                 "white_player": white_player_data,
                 "black_player": black_player_data,
-                # --- End Fix ---
                 "status": game.status.value,
                 "current_fen": current_fen,
                 "turn": "w" if board.turn == chess.WHITE else "b",
@@ -144,6 +144,11 @@ class GameFacade:
                 or board.is_fivefold_repetition(),
                 "moves": [move.move_notation for move in moves],
                 "chat_history": chat_history,
+                "white_time_ms": game.white_time_ms,
+                "black_time_ms": game.black_time_ms,
+                "last_move_at": (
+                    game.last_move_at.isoformat() if game.last_move_at else None
+                ),
             },
         }
 
@@ -171,6 +176,11 @@ class GameFacade:
             game.black_player_id = joining_player.user_id
 
         game.status = GameStatus.ACTIVE
+
+        game.white_time_ms = 3 * 60 * 1000
+        game.black_time_ms = 3 * 60 * 1000
+
+        game.last_move_at = datetime.now(timezone.utc)
 
         # 1. Send the UPDATE SQL to the database
         await self.game_repo.session.flush()
@@ -303,4 +313,23 @@ class GameFacade:
         command = SendChatCommand(
             game_id, sender, content, self.game_repo, self.ws_manager
         )
+        await command.execute()
+
+    async def resign_game(self, game_id: str, user: User) -> None:
+        """
+        Orchestrates a resignation.
+        """
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
+        if not game:
+            raise GameNotFoundError(f"Game {game_id} not found")
+
+        command = ResignGameCommand(game, user, self.game_repo, self.ws_manager)
+        await command.execute()
+        
+    async def claim_timeout(self, game_id: str) -> None:
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
+        if not game:
+             raise GameNotFoundError(f"Game {game_id} not found")
+        
+        command = ClaimTimeoutCommand(game, self.game_repo, self.ws_manager)
         await command.execute()

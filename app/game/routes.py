@@ -342,3 +342,41 @@ async def send_chat_route(game_id: str, current_user: User):
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
+
+
+@game_bp.route("/<string:game_id>/resign/", methods=["POST"])
+@token_required
+async def resign_game_route(game_id: str, current_user: User):
+    try:
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.resign_game(game_id, current_user)
+
+        response, status = create_success_response(
+            data={"message": "You have resigned."}, status_code=200
+        )
+        return jsonify(response), status
+
+    except Exception as e:
+        logger.error(f"Error resigning: {e}", exc_info=True)
+        response, status = create_error_response(str(e), 500)
+        return jsonify(response), status
+
+@game_bp.route("/<string:game_id>/claim-timeout/", methods=["POST"])
+@token_required
+async def claim_timeout_route(game_id: str, current_user: User):
+    try:
+        session: AsyncSession = g.session
+        container = get_container(session)
+        facade = container.get_game_facade()
+
+        await facade.claim_timeout(game_id)
+
+        # We don't really need to return data, the WebSocket will handle the UI update
+        return jsonify({"status": "checked"}), 200
+
+    except Exception as e:
+        logger.error(f"Error claiming timeout: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500

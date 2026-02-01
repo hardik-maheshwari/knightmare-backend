@@ -1,5 +1,6 @@
 import chess
 from app.game.commands.base import IGameCommand
+from app.game.exceptions import MoveNotPossibleError
 from app.game.repository import GameRepository
 from app.game.rules.context import MoveContext
 from app.game.rules.handlers import (
@@ -9,6 +10,7 @@ from app.game.rules.handlers import (
     TurnRule,
 )
 from app.game.serializers import build_websocket_payload
+from app.game.timer_service import TimerService
 from app.managers.game_manager import GameWebSocketManager
 from app.game.models import Game, GameStatus, Move, PlayerColor
 from app.auth.models import User
@@ -139,7 +141,6 @@ class MakeMoveCommand(IGameCommand):
         logger.debug(f"Created new unsaved Move object: {new_move.move_notation}")
         return new_move
 
-    
     async def execute(self) -> Move:
         # 1. Load History (Reusing logic from Facade)
         # We assume the command user has already imported the necessary helpers
@@ -161,6 +162,38 @@ class MakeMoveCommand(IGameCommand):
         )
         validation_chain.check(move_context)
 
+        mover_color = (
+            PlayerColor.WHITE
+            if self.player.user_id == self.game.white_player_id
+            else PlayerColor.BLACK
+        )
+
+        # Calculate deduction
+        is_flag_fall = TimerService.apply_move_time(self.game, mover_color)
+
+        if is_flag_fall:
+            logger.info(f"FLAG FALL! Player {mover_color} ran out of time.")
+            # 1. Update Status
+            self.game.status = (
+                GameStatus.BLACK_WIN
+                if mover_color == PlayerColor.WHITE
+                else GameStatus.WHITE_WIN
+            )
+
+            # 2. Persist Game State (Game Over)
+            await self.game_repo.save_game(self.game)
+
+            
+            ws_payload = build_websocket_payload(
+                self.game, latest_move
+            )  # Pass latest_move (no new move made)
+            # Add specific flag fall data
+            ws_payload["data"]["game_over_reason"] = "timeout"
+            await self.ws_manager.publish_event(self.game_id, ws_payload)
+
+            # 4. Stop execution (Do not create a move)
+            raise MoveNotPossibleError("Time ran out!")
+            
         # Capture the parsed move object from the context (populated by LegalMoveRule)
         self._move_object = cast(chess.Move, move_context.parsed_move)
 
@@ -193,5 +226,3 @@ class MakeMoveCommand(IGameCommand):
             f"Move '{self.move_uci}' successfully processed for game '{self.game_id}'."
         )
         return new_move
-
-    
