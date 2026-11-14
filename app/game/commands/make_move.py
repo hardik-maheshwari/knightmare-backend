@@ -1,6 +1,6 @@
 import chess
 from app.game.commands.base import IGameCommand
-from app.game.exceptions import MoveNotPossibleError
+from app.game.exceptions import TimeoutLossError
 from app.game.repository import GameRepository
 from app.game.rules.context import MoveContext
 from app.game.rules.handlers import (
@@ -192,7 +192,7 @@ class MakeMoveCommand(IGameCommand):
             await self.ws_manager.publish_event(self.game_id, ws_payload)
 
             # 4. Stop execution (Do not create a move)
-            raise MoveNotPossibleError("Time ran out!")
+            raise TimeoutLossError("Time ran out!")
             
         # Capture the parsed move object from the context (populated by LegalMoveRule)
         self._move_object = cast(chess.Move, move_context.parsed_move)

@@ -210,3 +210,4 @@ backend_tour.txt
 cloud-sql-proxy
 describe.sh
 temp.sh
+!.env.example

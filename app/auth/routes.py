@@ -4,17 +4,26 @@ from quart_bcrypt import Bcrypt
 from app.auth.auth_facade import AuthFacade
 from app.common.schemas import UserAuthRequest
 from app.logger_setup import get_logger
-from app.common.response_utils import create_error_response, create_success_response
+from app.common.response_utils import create_success_response
 from quart_rate_limiter import rate_limit
 from .models import User
 from .repository import AuthRepository
 from .decorators import token_required
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import ValidationError as PydanticValidationError
+
+# Errors are not caught here: they propagate to the handlers in app/errors.py
+# (UsernameTakenError -> 409, InvalidCredentialsError -> 401, validation -> 400,
+# anything else -> 500), and the session is rolled back for any error response.
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 logger = get_logger(__name__)
 bcrypt = Bcrypt()
+
+
+def _build_auth_facade() -> AuthFacade:
+    session: AsyncSession = g.session
+    secret_key = current_app.config["SECRET_KEY"]  # type: ignore
+    return AuthFacade(AuthRepository(session), bcrypt, secret_key)  # type: ignore
 
 
 @auth_bp.route("/test", methods=["GET"])
@@ -29,56 +38,23 @@ async def register_user():
     Handles new user registration.
     """
     logger.debug("--- /register: Request received ---")
-    username = None
 
-    try:
-        # 1. Validation
-        body = await request.get_json()
-        validated_data = UserAuthRequest(**body)
+    body = await request.get_json(silent=True)
+    validated_data = UserAuthRequest.model_validate(body)
+    username = validated_data.username
 
-        # Access clean data as attributes (IDE autocomplete works now!)
-        username = validated_data.username
-        password = validated_data.password
+    created_user = await _build_auth_facade().register(
+        username, validated_data.password
+    )
 
-        logger.debug(f"Input for username '{username}' passed validation.")
-
-        session: AsyncSession = g.session
-        auth_repo = AuthRepository(session)
-        secret_key = current_app.config["SECRET_KEY"]  # type: ignore
-        auth_facade = AuthFacade(auth_repo, bcrypt, secret_key)  # type: ignore
-
-        # 3. Delegate the entire business process to the facade.
-        created_user = await auth_facade.register(username, password)
-
-        logger.info(
-            f"User '{username}' created successfully with ID: {created_user.user_id}."
-        )
-
-        response_dict, status_code = create_success_response(
-            data={"message": f"User '{created_user.username}' created successfully."},
-            status_code=201,
-        )
-        return jsonify(response_dict), status_code
-
-    except PydanticValidationError as e:
-        # Clean error handling for invalid input
-        logger.warning(f"Validation failed: {e.errors()}")
-        # We take the first error message to show the user
-        msg = e.errors()[0]["msg"]
-        field = e.errors()[0]["loc"][0]
-        response_dict, status_code = create_error_response(
-            f"Invalid {field}: {msg}", 400
-        )
-        return jsonify(response_dict), status_code
-
-    except Exception as e:
-        log_username = f"for '{username}'" if username else ""
-        logger.error(
-            f"An unexpected error occurred during user registration {log_username}: {e}",
-            exc_info=True,
-        )
-        response_dict, status_code = create_error_response("Internal Server Error", 500)
-        return jsonify(response_dict), status_code
+    logger.info(
+        f"User '{username}' created successfully with ID: {created_user.user_id}."
+    )
+    response_dict, status_code = create_success_response(
+        data={"message": f"User '{created_user.username}' created successfully."},
+        status_code=201,
+    )
+    return jsonify(response_dict), status_code
 
 
 @auth_bp.route("/login/", methods=["POST"])
@@ -89,49 +65,15 @@ async def login():
     """
     logger.debug("--- /login: Request received ---")
 
-    username = None
+    body = await request.get_json(silent=True)
+    validated_data = UserAuthRequest.model_validate(body)
+    username = validated_data.username
 
-    try:
+    token = await _build_auth_facade().login(username, validated_data.password)
 
-        # 1. Validation
-        body = await request.get_json()
-        validated_data = UserAuthRequest(**body)
-
-        
-        username = validated_data.username
-        password = validated_data.password
-        logger.debug(f"Input for username '{username}' passed validation.")
-        session: AsyncSession = g.session
-        auth_repo = AuthRepository(session)
-        secret_key = current_app.config["SECRET_KEY"]  # type: ignore
-        auth_facade = AuthFacade(auth_repo, bcrypt, secret_key)  # type: ignore
-
-        token = await auth_facade.login(username, password)
-
-        logger.info(f"User '{username}' logged in successfully.")
-
-        response_dict, status_code = create_success_response(data={"token": token})
-        return jsonify(response_dict), status_code
-
-    except PydanticValidationError as e:
-        # Clean error handling for invalid input
-        logger.warning(f"Validation failed: {e.errors()}")
-        # We take the first error message to show the user
-        msg = e.errors()[0]["msg"]
-        field = e.errors()[0]["loc"][0]
-        response_dict, status_code = create_error_response(
-            f"Invalid {field}: {msg}", 400
-        )
-        return jsonify(response_dict), status_code
-
-    except Exception as e:
-        log_username = f"for '{username}'" if username else ""
-        logger.error(
-            f"An unexpected error occurred during login {log_username}: {e}",
-            exc_info=True,
-        )
-        response, status = create_error_response("Internal Server Error", 500)
-        return jsonify(response), status
+    logger.info(f"User '{username}' logged in successfully.")
+    response_dict, status_code = create_success_response(data={"token": token})
+    return jsonify(response_dict), status_code
 
 
 @auth_bp.route("/profile/", methods=["GET"])
@@ -144,7 +86,6 @@ async def get_user_profile(current_user: User):
         f"--- /profile: Request received. Authenticated user: {current_user.username} ---"
     )
 
-    # The decorator has already done all the work. We just use the result.
     response_dict, status_code = create_success_response(
         data={
             "user_id": current_user.user_id,

@@ -38,6 +38,15 @@ class GameFacade:
         self.auth_repo = auth_repo
         self.ws_manager = ws_manager
 
+    async def _get_game_for_player(self, game_id: str, user: User) -> Game:
+        """Fetch a game, ensuring it exists and that `user` is one of its players."""
+        game = await self.game_repo.get_game_by_id(game_id)
+        if game is None:
+            raise GameNotFoundError(f"Game with ID {game_id} not found.")
+        if user.user_id not in (game.white_player_id, game.black_player_id):
+            raise UserNotPlayerError("You are not a player in this game.")
+        return game
+
     async def create_game(self, creator: User) -> Game:
         """
         Orchestrates the creation of a new game.
@@ -297,7 +306,11 @@ class GameFacade:
         """
         Pass-through method for WebRTC signaling (PeerIDs, Ice Candidates).
         Does not persist to DB.
+
+        Only the game's players may signal: otherwise anyone could inject their
+        own peer ID and receive both players' camera/mic streams.
         """
+        await self._get_game_for_player(game_id, sender)
         message: Dict[str, Any] = {
             "type": "signal_update",
             "data": {
@@ -310,6 +323,7 @@ class GameFacade:
         await self.ws_manager.publish_event(game_id, message)
 
     async def send_chat_message(self, game_id: str, sender: User, content: str) -> None:
+        await self._get_game_for_player(game_id, sender)
         command = SendChatCommand(
             game_id, sender, content, self.game_repo, self.ws_manager
         )

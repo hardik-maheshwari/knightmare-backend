@@ -1,5 +1,5 @@
 import config
-from quart import Quart, g,request
+from quart import Quart, Response, g, request
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import register_error_handlers
 from .extensions import AsyncSessionLocal, rate_limiter
@@ -30,23 +30,40 @@ def create_app():
         if request.path == "/health":
             return
         g.session = AsyncSessionLocal()
-        logger.info("DB session opened")
+        logger.debug("DB session opened")
+
+    @app.after_request
+    async def finalize_db_session(response: Response) -> Response:
+        """
+        Commit on success, roll back on any error response.
+
+        Runs for normal responses AND for responses built by error handlers, so a
+        domain error (e.g. 'game not joinable') never commits half-done writes.
+        An error handler can set g.force_commit for errors whose state change must
+        persist (e.g. a flag-fall that ends the game while rejecting the move).
+        A failed commit raises here and Quart turns it into a 500.
+        """
+        session: AsyncSession | None = g.get("session")
+        if session is None:
+            return response
+
+        if response.status_code < 400 or g.get("force_commit"):
+            await session.commit()
+            logger.debug("Committed transaction")
+        else:
+            await session.rollback()
+            logger.info(
+                f"Rolled back transaction (response status {response.status_code})"
+            )
+        return response
 
     @app.teardown_appcontext
     async def close_db_session(exception=None):  # type: ignore
         session: AsyncSession | None = g.pop("session", None)
-
-        if session is None:
-            logger.debug("Session was none")
-        else:
-            if exception:
-                logger.info(f"Rolliing back transaction due to exception {exception}")
-                await session.rollback()
-            else:
-                logger.info("Commiting transaction")
-                await session.commit()
+        if session is not None:
+            # close() also rolls back anything not committed (e.g. unhandled errors).
             await session.close()
-        logger.info("--- DB Session Closed ---")
+            logger.debug("DB session closed")
 
     # 2. Register Blueprints
     logger.debug("Registering blueprints...")
@@ -56,9 +73,11 @@ def create_app():
     from .game.routes import game_bp
     from .game.ws_routes import ws_bp
 
-    app.register_blueprint(cors(main_bp, allow_origin="*"))
-    app.register_blueprint(cors(auth_bp, allow_origin="*"))
-    app.register_blueprint(cors(game_bp, allow_origin="*"))
+    allow_origin = config.CORS_ALLOW_ORIGIN
+    logger.info(f"CORS allowed origin(s): {allow_origin}")
+    app.register_blueprint(cors(main_bp, allow_origin=allow_origin))
+    app.register_blueprint(cors(auth_bp, allow_origin=allow_origin))
+    app.register_blueprint(cors(game_bp, allow_origin=allow_origin))
 
     app.register_blueprint(ws_bp)
     logger.debug("Registered 'ws_bp' (No CORS).")
@@ -68,7 +87,7 @@ def create_app():
     logger.info("Rate limiter initialized successfully.")
 
     register_error_handlers(app)
-    logger.debug("Custom error handler for RateLimitExceeded has been registered.")
+    logger.debug("Error handlers registered.")
 
     logger.info("Attaching ws manager")
     if config.USE_REDIS:

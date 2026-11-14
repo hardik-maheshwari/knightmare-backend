@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import cast
+from typing import Any, Dict, cast
 from quart import Blueprint, current_app, websocket
 from quart.wrappers import Websocket
 from app.auth.exceptions import InvalidCredentialsError, UserNotFoundError
@@ -26,67 +26,69 @@ async def game_websocket(game_id: str):
     ws = websocket._get_current_object()  # type: ignore
     assert isinstance(ws, Websocket)
     current_user: User | None = None
+    is_registered = False
     ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
 
     logger.info(f"--- WebSocket connection attempt for game '{game_id}' ---")
 
-    async with AsyncSessionLocal() as session:
-        try:
-            # 1. Instantiate Dependencies
+    try:
+        # The DB session is scoped to auth + initial sync ONLY. Holding it for the
+        # whole connection would pin one pooled DB connection per open socket
+        # (idle in transaction) and exhaust the pool after a handful of games.
+        async with AsyncSessionLocal() as session:
             container = get_container(session)
             ws_auth_service = container.get_ws_auth_facade()
             game_facade = container.get_game_facade()
 
-            # 2. Authenticate the connection using the dedicated service
+            # 1. Authenticate (the ticket must have been issued for THIS game)
             ticket = ws.args.get("ticket")
-
             if not ticket:
                 raise InvalidCredentialsError("Authentication ticket is missing.")
-            current_user = await ws_auth_service.validate_ticket(ticket)
+            current_user = await ws_auth_service.validate_ticket(ticket, game_id)
             logger.info(
                 f"WS connection for user '{current_user.username}' authenticated."
             )
 
-            # 3. Register the connection with the manager for future broadcasts
+            # 2. Register for broadcasts BEFORE reading state, so no update that
+            #    lands between the read and the registration is missed.
             await ws_manager.connect_to_game(game_id, ws)
+            is_registered = True
 
-            # 4. Perform the initial state sync for THIS client
-            logger.debug(
-                f"Sending initial game state for '{game_id}' to '{current_user.username}'."
+            # 3. Read the initial state for THIS client
+            initial_state_payload: Dict[str, Any] = (
+                await game_facade.get_serialized_game_state(game_id)
             )
-            initial_state_payload = await game_facade.get_serialized_game_state(game_id)
-            await ws.send(json.dumps(initial_state_payload))
+        # Session closed here; its connection is back in the pool.
 
-            # 5. Enter the perpetual listening loop
-            # The handler's main job is now just to keep the connection alive.
-            while True:
-                # We wait here until the client sends a message or disconnects.
-                await ws.receive()
+        logger.debug(
+            f"Sending initial game state for '{game_id}' to '{current_user.username}'."
+        )
+        await ws.send(json.dumps(initial_state_payload))
 
-        # 6. Handle specific lifecycle exceptions
-        except (InvalidCredentialsError, UserNotFoundError) as e:
-            logger.warning(f"WS auth failed for game '{game_id}': {e}")
-            await ws.close(1008, "Invalid or expired ticket")
-        except GameNotFoundError as e:
-            logger.warning(f"WS connection rejected: Game '{game_id}' not found. {e}")
-            await ws.close(1011, "Game not found")
-        except asyncio.CancelledError:
-            # This is a clean disconnect, not an error.
-            if current_user:
-                logger.info(
-                    f"WS connection for '{current_user.username}' in game '{game_id}' cancelled cleanly."
-                )
-        except Exception as e:
-            logger.error(
-                f"Unexpected error in websocket for game '{game_id}': {e}",
-                exc_info=True,
+        # 4. Keep the connection alive until the client disconnects.
+        while True:
+            await ws.receive()
+
+    except (InvalidCredentialsError, UserNotFoundError) as e:
+        logger.warning(f"WS auth failed for game '{game_id}': {e}")
+        await ws.close(1008, "Invalid or expired ticket")
+    except GameNotFoundError as e:
+        logger.warning(f"WS connection rejected: Game '{game_id}' not found. {e}")
+        await ws.close(1011, "Game not found")
+    except asyncio.CancelledError:
+        # Clean disconnect, not an error. Re-raise so Quart finishes the task.
+        if current_user:
+            logger.info(
+                f"WS connection for '{current_user.username}' in game '{game_id}' closed."
             )
-            await ws.close(1011, "Internal server error")
-        finally:
-            # 7. Guarantee cleanup on any exit path
-            if current_user:
-                logger.info(
-                    f"Disconnecting user '{current_user.username}' from game '{game_id}'."
-                )
+        raise
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in websocket for game '{game_id}': {e}",
+            exc_info=True,
+        )
+        await ws.close(1011, "Internal server error")
+    finally:
+        if is_registered:
             await ws_manager.disconnect_from_game(game_id, ws)
-            logger.debug(f"WS cleanup complete for game '{game_id}'.")
+        logger.debug(f"WS cleanup complete for game '{game_id}'.")

@@ -21,7 +21,7 @@ logger.info("Custom logger initialized successfully for alembic.env.")
 
 
 from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 from alembic import context
 
 logger.info("SQLAlchemy and Alembic components imported.")
@@ -60,7 +60,7 @@ def do_run_migrations(connection: Connection):
 def run_migrations_offline() -> None:
     logger.warning("Running in OFFLINE mode.")
     url = app_config.DATABASE_URL  # Get URL directly for offline mode too
-    logger.info(f"Offline mode URL from os.getenv: {url}")
+    logger.info(f"Offline mode URL: {app_config.DATABASE_URL_SAFE}")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -75,7 +75,7 @@ async def run_async_migrations():
     logger.info("run_async_migrations: Starting.")
 
     db_url = app_config.DATABASE_URL
-    logger.info(f"Step 1: Read DATABASE_URL from environment: '{db_url}'")
+    logger.info(f"Step 1: Using database {app_config.DATABASE_URL_SAFE}")
 
     if not db_url:
         logger.error(
@@ -83,22 +83,11 @@ async def run_async_migrations():
         )
         raise ValueError("DATABASE_URL environment variable is not set or is empty.")
 
-    config_options = {"url": db_url}
-    logger.info(f"Step 2: Created config dictionary for engine: {config_options}")
-
-    try:
-        logger.info("Step 3: Calling async_engine_from_config...")
-        connectable = async_engine_from_config(
-            config_options,
-            prefix="",  # We are not using a prefix like 'sqlalchemy.'
-            poolclass=pool.NullPool,
-        )
-        logger.info("Step 3: async_engine_from_config call SUCCEEDED.")
-    except Exception as e:
-        logger.error(
-            f"!!! FATAL: Error during async_engine_from_config: {e} !!!", exc_info=True
-        )
-        raise
+    connectable = create_async_engine(
+        db_url,
+        poolclass=pool.NullPool,
+        connect_args=app_config.DATABASE_CONNECT_ARGS,  # SSL for hosted Postgres
+    )
 
     logger.info("Step 4: Connecting to the database...")
     async with connectable.connect() as connection:
@@ -119,6 +108,9 @@ def run_migrations_online():
             f"!!! An error occurred during run_migrations_online: {e} !!!",
             exc_info=True,
         )
+        # Re-raise so `alembic upgrade head` exits non-zero and the deploy's
+        # entrypoint (set -e) stops instead of starting on a stale schema.
+        raise
 
 
 # --- Main Entry Point ---

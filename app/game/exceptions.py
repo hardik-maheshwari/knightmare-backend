@@ -28,3 +28,14 @@ class UserNotPlayerError(GameError):
     """Raised when a user attempts an action on a game they are not part of."""
 
     pass
+
+
+class TimeoutLossError(MoveNotPossibleError):
+    """
+    Raised when a player's flag fell before their move arrived.
+
+    The move is rejected, but the game-over state (status + clock) MUST still be
+    committed, so the error handler sets g.force_commit for this one.
+    """
+
+    pass

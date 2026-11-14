@@ -1,14 +1,17 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import chess
 from app.auth.models import User
 from app.game.models import Game, Move
 
 
-def build_websocket_payload(game: Game, latest_move: Move) -> Dict[str, Any]:
+def build_websocket_payload(game: Game, latest_move: Optional[Move]) -> Dict[str, Any]:
     """
     Lightweight serializer for broadcasts.
     O(1) Complexity. Uses game.current_fen and avoids fetching history.
+
+    latest_move is None when no moves exist yet (resign/timeout before the first
+    move, or undoing the only move).
     """
     # We use the stored FEN to create the board object instantly
     board = chess.Board(game.current_fen)
@@ -41,7 +44,7 @@ def build_websocket_payload(game: Game, latest_move: Move) -> Dict[str, Any]:
             "is_draw": board.is_stalemate() or board.is_insufficient_material(),
             # OPTIMIZATION: We only send the latest move, not the whole list.
             # The frontend should append this to its local list.
-            "last_move": latest_move.move_notation,
+            "last_move": latest_move.move_notation if latest_move else None,
             "moves": [],  # We send empty list or remove it to signal "no history sent"
             "white_time_ms": game.white_time_ms,
             "black_time_ms": game.black_time_ms,

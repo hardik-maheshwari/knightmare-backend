@@ -1,0 +1,61 @@
+# Production-like local stack: Postgres + Redis + backend (same image you deploy).
+#
+#   docker compose up --build        # API on http://localhost:8080
+#   docker compose down              # stop (add -v to also wipe the DB volume)
+#
+# The frontend's Vite dev server already proxies /api (incl. WebSockets) to
+# localhost:8080, so `npm run dev` in knightmare-frontend works against this.
+#
+# Not used by Render/Railway/Fly: they build ./Dockerfile and attach a managed
+# database via env vars. This file is for local runs or a single VPS.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: knightmare
+      POSTGRES_PASSWORD: knightmare
+      POSTGRES_DB: knightmare
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432" # host 5433 so it doesn't clash with a local Postgres on 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knightmare -d knightmare"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:-local-compose-secret-change-me}
+      DATABASE_URL: postgresql://knightmare:knightmare@db:5432/knightmare
+      # Redis mode, so the multi-instance code path (Redis pub/sub, shared
+      # tickets/rate limits) gets exercised locally. Set to "false" to mirror
+      # a single-instance deploy without Redis.
+      USE_REDIS: "true"
+      REDIS_URL: redis://redis:6379/0
+      RATELIMIT_STORAGE_URI: redis://redis:6379/1
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

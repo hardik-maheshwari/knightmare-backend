@@ -60,7 +60,11 @@ class WebSocketAuthFacade:
 
         ticket = secrets.token_urlsafe(24)
 
-        await self.redis_client.setex(f"ws_ticket:{ticket}", 15, current_user.user_id)
+        # The ticket is bound to this game: "<user_id>:<game_id>". Game IDs are
+        # URL-safe base64, so they never contain ':'.
+        await self.redis_client.setex(
+            f"ws_ticket:{ticket}", 15, f"{current_user.user_id}:{game_id}"
+        )
 
         logger.info(
             f"Issued WebSocket ticket for user '{current_user.username}' for game '{game_id}'."
@@ -68,13 +72,14 @@ class WebSocketAuthFacade:
 
         return ticket
 
-    async def validate_ticket(self, ticket: str) -> User:
+    async def validate_ticket(self, ticket: str, game_id: str) -> User:
         """
-        Validates a single-use WebSocket ticket, consumes it, and returns
-        the authenticated user.
+        Validates a single-use WebSocket ticket for `game_id`, consumes it, and
+        returns the authenticated user.
 
         Raises:
-            InvalidCredentialsError: If the ticket is missing, invalid, or expired.
+            InvalidCredentialsError: If the ticket is missing, invalid, expired,
+                or was issued for a different game.
             UserNotFoundError: If the user ID from a valid ticket does not exist.
         """
         if not ticket:
@@ -83,31 +88,36 @@ class WebSocketAuthFacade:
 
         redis_key = f"ws_ticket:{ticket}"
 
-        user_id_bytes = await self.redis_client.get(redis_key)
+        # GETDEL reads and consumes in one atomic step, so a ticket can't be
+        # used twice by two racing connections.
+        ticket_value = await self.redis_client.getdel(redis_key)
 
-        if user_id_bytes is None:
-            logger.warning(f"WS auth failed: Invalid or expired ticket used.")
+        if ticket_value is None:
+            logger.warning("WS auth failed: Invalid or expired ticket used.")
             raise InvalidCredentialsError(
                 "Authentication ticket is invalid or has expired."
             )
-
-        # 2. Consume the single-use ticket immediately.
-        await self.redis_client.delete(redis_key)
         logger.debug(f"Consumed single-use WS ticket from key: {redis_key}")
 
-        try:
-            user_id = int(user_id_bytes)
-        except (ValueError, TypeError):
-            logger.error(
-                f"Invalid user ID '{user_id_bytes}' found in Redis for ticket."
+        user_id_str, _, ticket_game_id = str(ticket_value).partition(":")
+
+        if ticket_game_id != game_id:
+            logger.warning(
+                f"WS auth failed: ticket issued for game '{ticket_game_id}' "
+                f"used for game '{game_id}'."
             )
+            raise InvalidCredentialsError("Authentication ticket is not valid for this game.")
+
+        try:
+            user_id = int(user_id_str)
+        except (ValueError, TypeError):
+            logger.error(f"Invalid ticket value '{ticket_value}' found in Redis.")
             raise InvalidCredentialsError("Corrupted authentication ticket.")
 
         user = await self.auth_repo.get_user_by_id_with_cache(user_id)
 
         if not user:
-            # This is a rare edge case where the user was deleted between
-            # the ticket being issued and being used.
+            # Rare edge case: the user was deleted between issue and use.
             logger.warning(
                 f"WS auth failed: User with ID {user_id} from valid ticket not found."
             )
