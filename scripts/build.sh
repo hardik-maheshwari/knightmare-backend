@@ -12,7 +12,7 @@
 set -e
 
 # --- Configuration ---
-PROJECT_ID="nomadic-grid-482904-u4"
+PROJECT_ID="knightmare-9qwrr0"
 REGION="us-central1"
 REPOSITORY="knightmare-backend"
 IMAGE_NAME="knightmare-backend"
