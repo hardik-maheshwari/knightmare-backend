@@ -1,6 +1,6 @@
 from app.game.commands.base import IGameCommand
 from app.game.repository import GameRepository
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.models import Game, GameStatus
 from app.auth.models import User
 from app.game.exceptions import GameError
@@ -16,7 +16,7 @@ class ResignGameCommand(IGameCommand):
         game: Game,
         player: User,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game = game
         self.player = player

@@ -20,7 +20,7 @@ from app.game.exceptions import (
 from app.game.models import Game, GameStatus, PlayerColor
 from app.game.repository import GameRepository
 from app.auth.repository import AuthRepository
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.logger_setup import get_logger
 from app.game.commands.make_move import MakeMoveCommand
 
@@ -32,7 +32,7 @@ class GameFacade:
         self,
         game_repo: GameRepository,
         auth_repo: AuthRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game_repo = game_repo
         self.auth_repo = auth_repo
@@ -147,10 +147,9 @@ class GameFacade:
                 "turn": "w" if board.turn == chess.WHITE else "b",
                 "is_check": board.is_check(),
                 "is_checkmate": board.is_checkmate(),
-                "is_draw": board.is_stalemate()
-                or board.is_insufficient_material()
-                or board.is_seventyfive_moves()
-                or board.is_fivefold_repetition(),
+                # Status is authoritative: repetition draws need the move
+                # history, which a FEN alone doesn't carry.
+                "is_draw": game.status == GameStatus.DRAW,
                 "moves": [move.move_notation for move in moves],
                 "chat_history": chat_history,
                 "white_time_ms": game.white_time_ms,
@@ -164,7 +163,9 @@ class GameFacade:
         return payload
 
     async def join_game(self, game_id: str, joining_player: User) -> Game:
-        game = await self.game_repo.get_game_with_players(game_id)
+        # Row lock: two users joining at once are serialized, and the second one
+        # sees status=ACTIVE and gets GameNotJoinableError.
+        game = await self.game_repo.get_game_with_players(game_id, for_update=True)
 
         if game is None:
             raise GameNotFoundError(f"Game with ID {game_id} not found.")
@@ -246,7 +247,7 @@ class GameFacade:
 
     async def undo_last_move(self, game_id: str, user: User) -> None:
         """
-        Orchestrates a takeback.
+        God-mode undo: takes back the last move without the opponent's consent.
         """
         logger.debug(
             f"--- Requesting Undo for game '{game_id}' by '{user.username}' ---"
@@ -256,13 +257,11 @@ class GameFacade:
         if not game:
             raise GameNotFoundError(f"Game {game_id} not found")
 
-        # Authorization Rule:
-        # For Beta: Only allow if user is a player.
-        # (In real app, you'd check if opponent agreed, etc.)
+        # "God mode" (testing only): a player undoes without the opponent's
+        # approval. The route is disabled unless ENABLE_GOD_MODE_UNDO is set;
+        # normal play goes through the request/respond takeback handshake.
         if user.user_id not in (game.white_player_id, game.black_player_id):
-            # Or raise UserNotPlayerError
-            logger.warning("User tried to undo but is not a player.")
-            return
+            raise UserNotPlayerError("Only players can undo moves.")
 
         command = UndoLastMoveCommand(game, self.game_repo, self.ws_manager)
         await command.execute()

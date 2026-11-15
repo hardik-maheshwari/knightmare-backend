@@ -5,6 +5,7 @@ from app.errors import register_error_handlers
 from .extensions import AsyncSessionLocal, rate_limiter
 from app.extensions import redis_client
 from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import DeferredEventPublisher
 from app.pubsub.providers.redis_pubsub_provider import RedisPubSubProvider
 from app.pubsub.providers.in_memory_provider import InMemoryPubSubProvider 
 from app.logger_setup import get_logger
@@ -42,16 +43,25 @@ def create_app():
         An error handler can set g.force_commit for errors whose state change must
         persist (e.g. a flag-fall that ends the game while rejecting the move).
         A failed commit raises here and Quart turns it into a 500.
+
+        Game events queued during the request (g.event_outbox) are published
+        only AFTER a successful commit, and dropped on rollback, so clients
+        never see state that didn't persist.
         """
         session: AsyncSession | None = g.get("session")
         if session is None:
             return response
+        outbox: DeferredEventPublisher | None = g.get("event_outbox")
 
         if response.status_code < 400 or g.get("force_commit"):
             await session.commit()
             logger.debug("Committed transaction")
+            if outbox is not None:
+                await outbox.flush()
         else:
             await session.rollback()
+            if outbox is not None:
+                outbox.discard()
             logger.info(
                 f"Rolled back transaction (response status {response.status_code})"
             )

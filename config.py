@@ -27,6 +27,9 @@ def _env_bool(var_name: str, default: str = "false") -> bool:
 
 DEBUG = _env_bool("DEBUG")
 USE_REDIS = _env_bool("USE_REDIS")
+# Testing aid: POST /api/games/<id>/undo/ takes back a move without the
+# opponent's consent. Off by default (the route returns 404).
+ENABLE_GOD_MODE_UNDO = _env_bool("ENABLE_GOD_MODE_UNDO")
 
 SECRET_KEY = get_required_env("SECRET_KEY")
 

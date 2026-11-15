@@ -11,7 +11,7 @@ from app.game.rules.handlers import (
 )
 from app.game.serializers import build_websocket_payload
 from app.game.timer_service import TimerService
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.models import Game, GameStatus, Move, PlayerColor
 from app.auth.models import User
 from typing import Optional, Tuple, cast
@@ -27,7 +27,7 @@ class MakeMoveCommand(IGameCommand):
         player: User,
         move_uci: str,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game = game
         self.player = player
@@ -45,13 +45,31 @@ class MakeMoveCommand(IGameCommand):
     async def _load_board_from_history(
         self, game_id: str
     ) -> Tuple[chess.Board, Optional[Move]]:
-        """Loads the chess.Board object from the latest move in the DB."""
-        latest_move = await self.game_repo.get_latest_move(game_id)
-        current_fen = (
-            latest_move.board_fen_after_move if latest_move else chess.STARTING_FEN
-        )
-        logger.debug(f"Loading board with FEN: {current_fen}")
-        return chess.Board(current_fen), latest_move
+        """
+        Rebuilds the board by replaying every move of the game.
+
+        A FEN is only a snapshot: a board built from it has no move stack, so
+        python-chess can't detect repetition draws. Replaying gives the board
+        its full history (a few hundred moves at most, ~1ms).
+
+        games.current_fen is kept as a denormalized copy for broadcasts and
+        timeout checks; a mismatch is logged and the replayed history wins.
+        """
+        moves = await self.game_repo.get_moves_for_game(game_id)
+        board = chess.Board()
+        for move in moves:
+            board.push_uci(move.move_notation)
+
+        if board.fen() != self.game.current_fen:
+            logger.error(
+                f"current_fen drift in game '{game_id}': column has "
+                f"'{self.game.current_fen}', move history gives '{board.fen()}'. "
+                f"Using the move history."
+            )
+
+        latest_move = moves[-1] if moves else None
+        logger.debug(f"Replayed {len(moves)} moves. FEN: {board.fen()}")
+        return board, latest_move
 
     def _get_captured_piece_symbol(
         self, board: chess.Board, move: chess.Move
@@ -93,45 +111,20 @@ class MakeMoveCommand(IGameCommand):
         game: Game,
         board: chess.Board,
         move_object: chess.Move,
-        latest_move: Optional[Move],
-        player: User,
+        move_number: int,
+        player_color: PlayerColor,
         captured_piece_symbol: Optional[str],
     ) -> Move:
         """
-        Creates and returns a new Move domain object based on the game state.
-        This method does NOT save the object.
+        Creates and returns a new Move domain object. `board` is the position
+        AFTER the move. This method does NOT save the object.
         """
-        player_color = (
-            PlayerColor.WHITE
-            if player.user_id == game.white_player_id
-            else PlayerColor.BLACK
-        )
-
-        if latest_move is None:
-            new_move_number = 1
-        elif latest_move.player_color == PlayerColor.BLACK:
-            new_move_number = latest_move.move_number + 1
-        else:
-            new_move_number = latest_move.move_number
-
-        new_fen = board.fen()
-        # Data integrity check for a potential bug in the chess library's FEN generation on checkmate
-        if board.is_checkmate() and ("k" not in new_fen or "K" not in new_fen):
-            logger.warning(
-                f"Invalid FEN '{new_fen}' on checkmate. Reverting FEN to pre-move state."
-            )
-            # Temporarily undo the move to get the last valid FEN
-            board.pop()
-            new_fen = board.fen()
-            # Re-apply the move to keep the board state consistent for subsequent checks
-            board.push(move_object)
-
         new_move = Move(
             game_id=game.game_id,
-            move_number=new_move_number,
+            move_number=move_number,
             player_color=player_color,
             move_notation=move_object.uci(),
-            board_fen_after_move=new_fen,
+            board_fen_after_move=board.fen(),
             is_check=board.is_check(),
             is_checkmate=board.is_checkmate(),
             is_castling=board.is_castling(move_object),
@@ -142,8 +135,7 @@ class MakeMoveCommand(IGameCommand):
         return new_move
 
     async def execute(self) -> Move:
-        # 1. Load History (Reusing logic from Facade)
-        # We assume the command user has already imported the necessary helpers
+        # 1. Load the board (full history replay; the game row is already locked)
         board, latest_move = await self._load_board_from_history(self.game_id)
 
         # 2. Build Context
@@ -200,18 +192,25 @@ class MakeMoveCommand(IGameCommand):
         captured_piece_symbol = self._get_captured_piece_symbol(
             board, self._move_object
         )
+        # Read from the board BEFORE pushing: the full-move number of this move
+        # (TurnRule already guaranteed mover_color == side to move).
+        move_number = board.fullmove_number
 
         board.push(self._move_object)  # Update board state
         self._update_game_status(self.game, board)  # Check for checkmate/draw
         self.game.current_fen = board.fen()
+
+        # A pending takeback offer referred to the previous position; a new
+        # move makes it stale (accepting it would undo THIS move instead).
+        self.game.takeback_requester_id = None
 
         # 6. Persist
         new_move = self._create_new_move(
             game=self.game,
             board=board,
             move_object=self._move_object,
-            latest_move=latest_move,
-            player=self.player,
+            move_number=move_number,
+            player_color=mover_color,
             captured_piece_symbol=captured_piece_symbol,
         )
 

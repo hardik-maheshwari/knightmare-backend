@@ -72,13 +72,16 @@ class GameRepository:
 
     async def get_moves_for_game(self, game_id: str) -> List[Move]:
         """
-        Retrieves all moves for a specific game, sorted chronologically.
+        Retrieves all moves for a specific game, in the order they were played.
+
+        Ordered by move_id: a game's moves are inserted one at a time under the
+        game-row lock, so move_id order IS play order. (created_at is the
+        transaction START time in Postgres, so it can't break the tie between
+        White's and Black's move that share a move_number.)
         """
         logger.debug(f"Querying for all moves in game '{game_id}'")
         statement = (
-            select(Move)
-            .where(Move.game_id == game_id)
-            .order_by(Move.move_number.asc(), Move.created_at.asc())
+            select(Move).where(Move.game_id == game_id).order_by(Move.move_id.asc())
         )
 
         result = await self.session.execute(statement)
@@ -110,7 +113,7 @@ class GameRepository:
         statement = (
             select(Move)
             .where(Move.game_id == game_id)
-            .order_by(Move.move_number.desc(), Move.created_at.desc())
+            .order_by(Move.move_id.desc())
             .limit(1)
         )
         result = await self.session.execute(statement)

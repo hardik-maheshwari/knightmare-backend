@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 import chess
 from app.auth.models import User
-from app.game.models import Game, Move
+from app.game.models import Game, GameStatus, Move
 
 
 def build_websocket_payload(game: Game, latest_move: Optional[Move]) -> Dict[str, Any]:
@@ -41,7 +41,7 @@ def build_websocket_payload(game: Game, latest_move: Optional[Move]) -> Dict[str
             "turn": "w" if board.turn == chess.WHITE else "b",
             "is_check": board.is_check(),
             "is_checkmate": board.is_checkmate(),
-            "is_draw": board.is_stalemate() or board.is_insufficient_material(),
+            "is_draw": game.status == GameStatus.DRAW,
             # OPTIMIZATION: We only send the latest move, not the whole list.
             # The frontend should append this to its local list.
             "last_move": latest_move.move_notation if latest_move else None,

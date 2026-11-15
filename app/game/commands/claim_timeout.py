@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from app.game.commands.base import IGameCommand
 from app.game.repository import GameRepository
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.models import Game, GameStatus
 from app.game.serializers import build_websocket_payload
 from app.logger_setup import get_logger
@@ -14,7 +14,7 @@ class ClaimTimeoutCommand(IGameCommand):
         self,
         game: Game,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game = game
         self.game_repo = game_repo

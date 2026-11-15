@@ -1,7 +1,7 @@
 from app.game.commands.base import IGameCommand
 from app.game.repository import GameRepository
 from app.game.serializers import build_takeback_offer_payload
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.models import Game
 from app.auth.models import User
 from app.game.exceptions import GameError
@@ -16,7 +16,7 @@ class RequestTakebackCommand(IGameCommand):
         game: Game,
         requester: User,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game = game
         self.requester = requester

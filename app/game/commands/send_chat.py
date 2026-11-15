@@ -1,7 +1,7 @@
 from app.game.commands.base import IGameCommand
 from app.game.models import ChatMessage
 from app.auth.models import User
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.repository import GameRepository
 from typing import Any, Dict
 
@@ -12,7 +12,7 @@ class SendChatCommand(IGameCommand):
         sender: User,
         content: str,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game_id = game_id
         self.sender = sender

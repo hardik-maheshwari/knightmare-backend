@@ -1,5 +1,5 @@
-from typing import Any, Dict
-from quart import Blueprint, jsonify, g, request
+from typing import Any, Dict, cast
+from quart import Blueprint, current_app, jsonify, g, request
 
 from app.auth.models import User
 from app.auth.decorators import token_required
@@ -9,8 +9,11 @@ from app.common.schemas import MoveRequest, TakebackResponseRequest
 from app.dependency_injection import get_container
 from app.game.facade import GameFacade
 from app.game.models import Game
+from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import DeferredEventPublisher
 from app.logger_setup import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession
+from werkzeug.exceptions import NotFound
 
 # Errors are not caught here: domain exceptions propagate to app/errors.py, which
 # maps them to 400/403/404/409 (unexpected ones to 500), and any error response
@@ -24,8 +27,15 @@ MAX_CHAT_LENGTH = 500  # matches the frontend input's maxLength
 
 
 def _game_facade() -> GameFacade:
+    """
+    Facade for this request. Its events are queued in g.event_outbox and only
+    published after the transaction commits (see finalize_db_session).
+    """
     session: AsyncSession = g.session
-    return get_container(session).get_game_facade()
+    if g.get("event_outbox") is None:
+        ws_manager = cast(GameWebSocketManager, current_app.ws_manager)  # type: ignore
+        g.event_outbox = DeferredEventPublisher(ws_manager)
+    return get_container(session, g.event_outbox).get_game_facade()
 
 
 async def _json_body() -> Dict[str, Any]:
@@ -134,8 +144,12 @@ async def make_move_route(game_id: str, current_user: User):
 @token_required
 async def undo_move_route(game_id: str, current_user: User):
     """
-    Beta Feature: Request a takeback (Undo last move).
+    "God mode" undo for testing: takes back the last move without the
+    opponent's consent. Disabled (404) unless ENABLE_GOD_MODE_UNDO is set;
+    real games use /takeback/request/ + /takeback/respond/.
     """
+    if not current_app.config.get("ENABLE_GOD_MODE_UNDO"):
+        raise NotFound()
     await _game_facade().undo_last_move(game_id, current_user)
 
     response, status = create_success_response(

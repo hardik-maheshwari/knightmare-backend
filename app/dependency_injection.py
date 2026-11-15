@@ -1,6 +1,6 @@
 from quart import current_app
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import cast
+from typing import Optional, cast
 
 from app.auth.repository import AuthRepository
 from app.auth.auth_facade import AuthFacade
@@ -8,6 +8,7 @@ from app.auth.websocket_auth_facade import WebSocketAuthFacade
 from app.game.repository import GameRepository
 from app.game.facade import GameFacade
 from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.extensions import redis_client
 from quart_bcrypt import Bcrypt
 
@@ -18,8 +19,13 @@ class Container:
     Centralizes the creation of Facades and Services.
     """
 
-    def __init__(self, session: AsyncSession):
+    def __init__(
+        self, session: AsyncSession, event_publisher: Optional[EventPublisher] = None
+    ):
         self.session = session
+        # HTTP requests pass a per-request DeferredEventPublisher (events go out
+        # after commit). Without one, events are published immediately.
+        self._event_publisher = event_publisher
 
         # Repositories (Cached per container instance)
         self._game_repo = None
@@ -46,7 +52,7 @@ class Container:
         return GameFacade(
             game_repo=self.game_repo,
             auth_repo=self.auth_repo,
-            ws_manager=self.ws_manager,
+            ws_manager=self._event_publisher or self.ws_manager,
         )
 
     def get_auth_facade(self) -> AuthFacade:
@@ -66,5 +72,7 @@ class Container:
         )
 
 
-def get_container(session: AsyncSession) -> Container:
-    return Container(session)
+def get_container(
+    session: AsyncSession, event_publisher: Optional[EventPublisher] = None
+) -> Container:
+    return Container(session, event_publisher)

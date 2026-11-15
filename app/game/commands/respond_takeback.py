@@ -1,7 +1,7 @@
 from app.game.commands.base import IGameCommand
 from app.game.commands.undo_move import UndoLastMoveCommand
 from app.game.repository import GameRepository
-from app.managers.game_manager import GameWebSocketManager
+from app.managers.publisher import EventPublisher
 from app.game.models import Game
 from app.auth.models import User
 from app.game.exceptions import GameError
@@ -17,7 +17,7 @@ class RespondTakebackCommand(IGameCommand):
         responder: User,
         is_accepted: bool,
         game_repo: GameRepository,
-        ws_manager: GameWebSocketManager,
+        ws_manager: EventPublisher,
     ):
         self.game = game
         self.responder = responder
